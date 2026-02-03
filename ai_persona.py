@@ -1,5 +1,5 @@
 """
-AI VTuber Persona System v5.5
+AI VTuber Persona System v5.6
 Fixes:
 - Clearer role separation in prompts (fixes "You are Schizo Chair" confusion)
 - Aggressive output cleaning (removes |>system, role confusion, etc.)
@@ -28,6 +28,12 @@ Fixes:
   - Auto-processing with configurable response chance
   - Priority keywords and user cooldowns
   - Commands: !kick connect, !kick poll, !kick process
+- v5.6: Idle Chatter system (Fill dead air)
+  - When chat is quiet, AI talks about random topics
+  - Topics loaded from .txt files in topics/ folder
+  - Keeps stream engaging even without viewer interaction
+  - Chat always takes priority over rambling
+  - Commands: !idle chatter on/off, !idle topics, !idle ramble
 """
 
 import os
@@ -184,6 +190,35 @@ class Config:
     WEBSOCKET_PORT = 8765
     ANIMATIONS_DIR = Path("./animations")
     RETURN_TO_IDLE_DELAY = 0.3
+    
+    # ─────────────────────────────────────────────────
+    # IDLE CHATTER (Fill dead air when no chat)
+    # ─────────────────────────────────────────────────
+    # When enabled, the AI will talk about random topics if chat is quiet
+    # This keeps the stream engaging even with no viewer interaction
+    
+    IDLE_CHATTER_ENABLED = False  # Enable with !idle chatter on
+    
+    # How long to wait (seconds) with no activity before starting to ramble
+    # Shorter = AI starts talking faster when chat is quiet
+    IDLE_TIMEOUT_SECONDS = 45.0
+    
+    # Minimum time between rambles (seconds)
+    # This gives the AI time to finish speaking before starting next topic
+    IDLE_RAMBLE_INTERVAL = 5.0
+    
+    # Maximum rambles in a row before picking a new topic file
+    # Prevents getting stuck on one topic too long
+    IDLE_MAX_RAMBLES_PER_TOPIC = 3
+    
+    # Token limit for idle chatter (can be different from chat responses)
+    IDLE_CHATTER_TOKENS = 200
+    
+    # Directory containing topic files
+    IDLE_TOPICS_DIR = Path("./topics")
+    
+    # Emotions to use for idle chatter (randomly selected)
+    IDLE_EMOTIONS = ['happy', 'playful', 'excited', 'neutral', 'confused']
 
 # ============================================================================
 # CHAT QUEUE
@@ -263,6 +298,13 @@ class ChatQueue:
             msg = ChatMessage.create(username, content.strip())
             self.queue.append(msg)
             self.message_timestamps.append(now)
+            
+            # Reset idle chatter - chat activity detected
+            # (idle_chatter may not be initialized yet during startup)
+            try:
+                idle_chatter.reset_activity()
+            except NameError:
+                pass
             
             return msg
     
@@ -1302,6 +1344,9 @@ class ChatProcessor:
                 msg = chat_queue.get_next_message()
                 
                 if msg:
+                    # Reset idle chatter (chat takes priority)
+                    idle_chatter.reset_activity()
+                    
                     # Process the message
                     print(f"\n    📨 Processing: {msg.username}: {msg.content[:40]}...")
                     print("    🤔...")
@@ -1312,6 +1357,9 @@ class ChatProcessor:
                         display_text = clean_response(response)
                         print(f"\n{character.name}: {display_text}")
                         speak_text(response, extract_emotion(response))
+                    
+                    # Reset activity again after responding
+                    idle_chatter.reset_activity()
                 
                 # Small delay between checks
                 time.sleep(0.5)
@@ -1322,6 +1370,288 @@ class ChatProcessor:
 
 # Create global chat processor instance
 chat_processor = ChatProcessor()
+
+# ============================================================================
+# IDLE CHATTER SYSTEM
+# ============================================================================
+
+class IdleChatterManager:
+    """
+    Manages autonomous "rambling" when chat is quiet.
+    
+    When no chat activity occurs for IDLE_TIMEOUT_SECONDS, the AI will:
+    1. Pick a random topic file from the topics/ folder
+    2. Generate a response about that topic
+    3. Continue rambling until chat activity resumes
+    
+    Topic files are simple .txt files containing prompts/topics, one per line.
+    Example: "Talk about your favorite video game and why you love it"
+    """
+    
+    def __init__(self):
+        self.is_enabled = Config.IDLE_CHATTER_ENABLED
+        self.is_rambling = False
+        self._stop_event = threading.Event()
+        self._thread = None
+        
+        # Activity tracking
+        self.last_activity_time = time.time()
+        self._activity_lock = threading.Lock()
+        
+        # Topic management
+        self.current_topic_file = None
+        self.current_topics = []
+        self.rambles_on_current_topic = 0
+        self.used_prompts = set()  # Track used prompts to avoid immediate repeats
+        
+        # State
+        self.is_streaming = False
+        
+        # Ensure topics directory exists
+        Config.IDLE_TOPICS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    def enable(self):
+        """Enable idle chatter"""
+        self.is_enabled = True
+        Config.IDLE_CHATTER_ENABLED = True
+        self.reset_activity()
+        print("    ✓ Idle chatter enabled")
+    
+    def disable(self):
+        """Disable idle chatter"""
+        self.is_enabled = False
+        Config.IDLE_CHATTER_ENABLED = False
+        self.stop()
+        print("    ✓ Idle chatter disabled")
+    
+    def reset_activity(self):
+        """Reset the activity timer (call when chat message received)"""
+        with self._activity_lock:
+            self.last_activity_time = time.time()
+            # If we were rambling, stop
+            if self.is_rambling:
+                self.is_rambling = False
+    
+    def get_idle_duration(self) -> float:
+        """Get seconds since last activity"""
+        with self._activity_lock:
+            return time.time() - self.last_activity_time
+    
+    def should_ramble(self) -> bool:
+        """Check if we should start/continue rambling"""
+        if not self.is_enabled:
+            return False
+        if not self.is_streaming:
+            return False
+        # Check if we've been idle long enough
+        return self.get_idle_duration() >= Config.IDLE_TIMEOUT_SECONDS
+    
+    def get_topic_files(self) -> List[Path]:
+        """Get all topic files from the topics directory"""
+        if not Config.IDLE_TOPICS_DIR.exists():
+            return []
+        
+        files = []
+        for ext in ['*.txt', '*.md']:
+            files.extend(Config.IDLE_TOPICS_DIR.glob(ext))
+        return sorted(files)
+    
+    def load_topic_file(self, file_path: Path) -> List[str]:
+        """Load prompts from a topic file"""
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            # Split by lines, filter empty lines and comments
+            prompts = []
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    prompts.append(line)
+            return prompts
+        except Exception as e:
+            print(f"    ⚠ Error loading {file_path.name}: {e}")
+            return []
+    
+    def pick_topic_file(self) -> Optional[Path]:
+        """Pick a random topic file"""
+        files = self.get_topic_files()
+        if not files:
+            return None
+        return random.choice(files)
+    
+    def get_ramble_prompt(self) -> Optional[str]:
+        """Get a prompt to ramble about"""
+        
+        # Check if we need a new topic file
+        need_new_file = (
+            self.current_topic_file is None or
+            not self.current_topics or
+            self.rambles_on_current_topic >= Config.IDLE_MAX_RAMBLES_PER_TOPIC
+        )
+        
+        if need_new_file:
+            # Pick a new topic file
+            self.current_topic_file = self.pick_topic_file()
+            if self.current_topic_file:
+                self.current_topics = self.load_topic_file(self.current_topic_file)
+                self.rambles_on_current_topic = 0
+                # Clear used prompts for new file
+                self.used_prompts.clear()
+        
+        if not self.current_topics:
+            return None
+        
+        # Try to pick an unused prompt first
+        available = [p for p in self.current_topics if p not in self.used_prompts]
+        
+        if not available:
+            # All prompts used, reset and pick any
+            self.used_prompts.clear()
+            available = self.current_topics
+        
+        prompt = random.choice(available)
+        self.used_prompts.add(prompt)
+        self.rambles_on_current_topic += 1
+        
+        return prompt
+    
+    def start(self):
+        """Start the idle chatter background thread"""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._ramble_loop, daemon=True)
+        self._thread.start()
+        print("    ✓ Idle chatter monitor started")
+    
+    def stop(self):
+        """Stop the idle chatter thread"""
+        self._stop_event.set()
+        self.is_rambling = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+    
+    def _ramble_loop(self):
+        """Background loop that checks for idle state and generates rambles"""
+        while not self._stop_event.is_set():
+            try:
+                # Check if we should be rambling
+                if self.should_ramble():
+                    # Check if there are chat messages waiting (they take priority)
+                    if chat_queue.get_pending_count() > 0:
+                        # Chat has priority, reset activity
+                        self.reset_activity()
+                        time.sleep(1)
+                        continue
+                    
+                    # Get a topic to ramble about
+                    prompt = self.get_ramble_prompt()
+                    
+                    if prompt:
+                        self.is_rambling = True
+                        
+                        # Generate and speak the ramble
+                        self._generate_ramble(prompt)
+                        
+                        # Wait before next ramble
+                        time.sleep(Config.IDLE_RAMBLE_INTERVAL)
+                    else:
+                        # No topics available
+                        time.sleep(5)
+                else:
+                    # Not time to ramble yet, check periodically
+                    time.sleep(1)
+                    
+            except Exception as e:
+                print(f"    ❌ Idle chatter error: {e}")
+                time.sleep(2)
+    
+    def _generate_ramble(self, prompt: str):
+        """Generate a single ramble response"""
+        # Double-check that chat hasn't become active
+        if chat_queue.get_pending_count() > 0:
+            self.reset_activity()
+            return
+        
+        try:
+            # Build a special system prompt for rambling
+            char = character.name
+            
+            emotion = random.choice(Config.IDLE_EMOTIONS)
+            
+            system_prompt = f"""You are {char}, a VTuber who is currently streaming.
+
+About {char}:
+{character.description[:300] if character.description else "A friendly AI VTuber."}
+
+You are currently on stream and chat has been quiet. Fill the dead air by talking about the following topic naturally and engagingly. Speak as if you're sharing your thoughts with your audience.
+
+Keep it conversational and entertaining. Don't ask too many questions - just share your thoughts, tell a story, or ramble about the topic. 
+
+Start your response with [EMOTION: {emotion}]
+
+Topic/Prompt: {prompt}
+
+RULES:
+- Speak naturally as {char} in first person
+- Be engaging and entertaining
+- Don't mention that you're "filling time" or that chat is quiet
+- Keep the energy up
+- 2-4 sentences is perfect"""
+
+            # Use the idle chatter token limit
+            response = get_llm(Config.IDLE_CHATTER_TOKENS).invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Share your thoughts on: {prompt}")
+            ]).content
+            
+            # Clean and speak
+            response = clean_llm_response(response, "audience", character.name)
+            response = ensure_complete_sentence(response)
+            
+            # Check one more time for chat activity
+            if chat_queue.get_pending_count() > 0:
+                self.reset_activity()
+                return
+            
+            display_text = clean_response(response)
+            detected_emotion = extract_emotion(response)
+            
+            # Show what topic inspired this
+            topic_name = self.current_topic_file.stem if self.current_topic_file else "unknown"
+            print(f"\n    💭 [Idle: {topic_name}]")
+            print(f"{character.name}: {display_text}")
+            
+            speak_text(response, detected_emotion)
+            
+            # Reset activity time after speaking (to space out rambles)
+            # But set it to be just before the threshold so next ramble happens at interval
+            with self._activity_lock:
+                self.last_activity_time = time.time() - Config.IDLE_TIMEOUT_SECONDS + Config.IDLE_RAMBLE_INTERVAL
+                
+        except Exception as e:
+            print(f"    ❌ Ramble generation error: {e}")
+    
+    def get_status(self) -> dict:
+        """Get status info"""
+        topic_files = self.get_topic_files()
+        return {
+            'enabled': self.is_enabled,
+            'rambling': self.is_rambling,
+            'idle_seconds': round(self.get_idle_duration(), 1),
+            'timeout': Config.IDLE_TIMEOUT_SECONDS,
+            'topic_files': len(topic_files),
+            'current_topic': self.current_topic_file.stem if self.current_topic_file else None,
+            'rambles_on_topic': self.rambles_on_current_topic
+        }
+    
+    def list_topics(self) -> List[str]:
+        """List all available topic files"""
+        return [f.stem for f in self.get_topic_files()]
+
+# Create global idle chatter instance
+idle_chatter = IdleChatterManager()
 
 try:
     import websockets
@@ -1853,6 +2183,14 @@ Kick.com Chat:
   {Config.ADMIN_PREFIX}kick process      - Start auto-processing + polling
   {Config.ADMIN_PREFIX}kick next         - Process one message manually
   {Config.ADMIN_PREFIX}kick clear        - Clear message queue
+
+Idle Chatter (Fill Dead Air):
+  {Config.ADMIN_PREFIX}idle chatter      - Show idle chatter status
+  {Config.ADMIN_PREFIX}idle chatter on   - Enable idle chatter
+  {Config.ADMIN_PREFIX}idle chatter off  - Disable idle chatter
+  {Config.ADMIN_PREFIX}idle topics       - List available topic files
+  {Config.ADMIN_PREFIX}idle timeout <s>  - Set idle timeout (seconds)
+  {Config.ADMIN_PREFIX}idle ramble       - Force a single ramble now
 """)
     else:
         print("  (Admin commands hidden - you are not an admin)")
@@ -1860,7 +2198,7 @@ Kick.com Chat:
 
 def main():
     print("─" * 50)
-    print(f"🎭 {character.name} - v5.5")
+    print(f"🎭 {character.name} - v5.6")
     print("─" * 50)
     print(f"WebSocket: ws://localhost:{Config.WEBSOCKET_PORT}")
     print(f"Admins: {', '.join(Config.ADMIN_USERS)}")
@@ -1882,6 +2220,13 @@ def main():
         print(f"Kick: Available (use !kick connect)")
     else:
         print(f"Kick: Not available (pip install KickApi)")
+    
+    # Idle chatter status
+    topic_count = len(idle_chatter.get_topic_files())
+    if topic_count > 0:
+        print(f"Idle Chatter: {topic_count} topic files (use !idle chatter on)")
+    else:
+        print(f"Idle Chatter: No topics in {Config.IDLE_TOPICS_DIR}/ (create .txt files)")
     
     print("Type 'help' for commands")
     print("─" * 50)
@@ -1975,11 +2320,16 @@ def main():
                 # --- Admin: Stream mode ---
                 if admin_cmd == "stream on":
                     is_streaming = True
+                    idle_chatter.is_streaming = True
+                    chat_processor.is_streaming = True
                     print("    🔴 STREAMING ON")
                     continue
                 
                 if admin_cmd == "stream off":
                     is_streaming = False
+                    idle_chatter.is_streaming = False
+                    idle_chatter.stop()  # Stop idle chatter when not streaming
+                    chat_processor.is_streaming = False
                     print("    ⚫ STREAMING OFF")
                     continue
                 
@@ -2252,6 +2602,82 @@ def main():
                     print("    🗑️ Queue cleared")
                     continue
                 
+                # ─────────────────────────────────────────────────
+                # IDLE CHATTER COMMANDS
+                # ─────────────────────────────────────────────────
+                
+                # Bare !idle chatter command - show status
+                if admin_cmd == "idle chatter":
+                    status = idle_chatter.get_status()
+                    print("    Idle Chatter Status:")
+                    print(f"      Enabled: {'Yes 💭' if status['enabled'] else 'No'}")
+                    print(f"      Rambling: {'Yes' if status['rambling'] else 'No'}")
+                    print(f"      Idle for: {status['idle_seconds']}s (timeout: {status['timeout']}s)")
+                    print(f"      Topic files: {status['topic_files']}")
+                    if status['current_topic']:
+                        print(f"      Current topic: {status['current_topic']} ({status['rambles_on_topic']} rambles)")
+                    print("    Commands: on, off, topics, timeout <s>, ramble")
+                    continue
+                
+                if admin_cmd == "idle chatter on":
+                    if not is_streaming:
+                        print("    ⚠ Enable streaming first with !stream on")
+                        continue
+                    
+                    # Check if topic files exist
+                    topic_files = idle_chatter.get_topic_files()
+                    if not topic_files:
+                        print(f"    ⚠ No topic files found in {Config.IDLE_TOPICS_DIR}/")
+                        print(f"    Create .txt files with prompts (one per line)")
+                        print(f"    Example: echo 'Talk about your favorite video game' > topics/games.txt")
+                        continue
+                    
+                    idle_chatter.is_streaming = True
+                    idle_chatter.enable()
+                    idle_chatter.start()
+                    print(f"    Found {len(topic_files)} topic file(s): {', '.join(idle_chatter.list_topics())}")
+                    continue
+                
+                if admin_cmd == "idle chatter off":
+                    idle_chatter.disable()
+                    continue
+                
+                if admin_cmd == "idle topics":
+                    topics = idle_chatter.list_topics()
+                    if topics:
+                        print(f"    📚 Topic files ({len(topics)}):")
+                        for name in topics:
+                            file_path = Config.IDLE_TOPICS_DIR / f"{name}.txt"
+                            if file_path.exists():
+                                lines = len([l for l in file_path.read_text(encoding='utf-8').splitlines() if l.strip() and not l.strip().startswith('#')])
+                                print(f"      {name}.txt ({lines} prompts)")
+                    else:
+                        print(f"    📂 No topic files in {Config.IDLE_TOPICS_DIR}/")
+                        print(f"    Create .txt files with prompts, one per line")
+                    continue
+                
+                if admin_cmd.startswith("idle timeout "):
+                    try:
+                        seconds = float(admin_input[13:].strip())
+                        if seconds < 5:
+                            print("    ⚠ Minimum timeout is 5 seconds")
+                        else:
+                            Config.IDLE_TIMEOUT_SECONDS = seconds
+                            print(f"    ✓ Idle timeout set to {seconds}s")
+                    except ValueError:
+                        print("    ⚠ Usage: !idle timeout <seconds>")
+                    continue
+                
+                if admin_cmd == "idle ramble":
+                    # Force a single ramble now (for testing)
+                    prompt = idle_chatter.get_ramble_prompt()
+                    if prompt:
+                        print(f"    💭 Forcing ramble: {prompt[:50]}...")
+                        idle_chatter._generate_ramble(prompt)
+                    else:
+                        print("    ⚠ No topics available. Add .txt files to topics/")
+                    continue
+                
                 # Unknown admin command
                 print(f"    ⚠ Unknown admin command. Type 'help' for list.")
                 continue
@@ -2259,12 +2685,18 @@ def main():
             # ─────────────────────────────────────────────────
             # NORMAL CHAT (anything else goes to LLM)
             # ─────────────────────────────────────────────────
+            # Reset idle chatter when manual chat happens
+            idle_chatter.reset_activity()
+            
             print("    🤔...")
             response = process_message(current_user, user_input, is_streaming)
             
             if response:
                 print(f"\n{character.name}: {clean_response(response)}")
                 speak_text(response, extract_emotion(response))
+            
+            # Reset activity again after responding
+            idle_chatter.reset_activity()
             
         except KeyboardInterrupt:
             print("\n\n👋 Bye!")
