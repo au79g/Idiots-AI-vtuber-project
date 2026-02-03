@@ -46,7 +46,7 @@ Double-click `start.bat` and select **[1] Start AI + Open Stage**
 Or:
 ```bash
 venv\Scripts\activate
-python ai_persona_v5_5.py
+python ai_persona.py
 ```
 
 ## 📁 Project Structure
@@ -87,7 +87,7 @@ ai-vtuber/
 
 ## ⚙️ Configuration
 
-Edit the `Config` class in `ai_persona_v5_5.py`:
+Edit the `Config` class in `ai_persona.py`:
 
 ### Essential Settings
 ```python
