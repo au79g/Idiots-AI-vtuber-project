@@ -1,0 +1,35 @@
+{
+  "name": "Your Character Name",
+  "description": "A detailed description of your character. Include their appearance, backstory, and any unique traits. This helps the AI understand who they're portraying.\n\nExample: What do they look like? What's their history? What makes them unique?",
+  "personality": "List personality traits separated by commas. Example: friendly, energetic, prone to puns, secretly shy, loves cats, night owl",
+  "scenario": "The current situation or setting. Example: Your character is live streaming on Twitch, chatting with viewers while playing games.",
+  "first_mes": "[EMOTION: excited] This is what your character says when someone first joins! Make it welcoming and in-character. The [EMOTION: tag] helps the system choose animations.",
+  "mes_example": "{{user}}: Example question from a viewer?\n{{char}}: [EMOTION: happy] Example response showing how your character talks and acts! Include their mannerisms, speech patterns, and personality.\n\n{{user}}: Another example question?\n{{char}}: [EMOTION: surprised] Another example response! These help the AI learn your character's voice and style.",
+  "system_prompt": "Core instructions for the AI. List key behaviors:\n- Important trait 1\n- Important trait 2\n- How they react to certain topics\n- Speech patterns or catchphrases\n- Things they should or shouldn't do",
+  "post_history_instructions": "Reminders for the AI to check after each response. Example: Stay in character, remember to use emotion tags, reference running jokes.",
+  "creator_notes": "Notes for yourself or others who might use this character. What works well? What to avoid?",
+  "tags": ["vtuber", "add", "relevant", "tags"],
+  "creator": "Your Name (optional)",
+  "character_version": "1.0",
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "Your Character Name",
+    "description": "Same as above - some apps read from this nested location",
+    "personality": "Same as above",
+    "scenario": "Same as above", 
+    "first_mes": "Same as above",
+    "mes_example": "Same as above",
+    "system_prompt": "Same as above",
+    "post_history_instructions": "Same as above",
+    "creator_notes": "Same as above",
+    "tags": ["vtuber", "add", "relevant", "tags"],
+    "creator": "Your Name (optional)",
+    "character_version": "1.0",
+    "extensions": {
+      "talkativeness": "0.8",
+      "fav": false,
+      "world": ""
+    }
+  }
+}

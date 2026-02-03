@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VRM Viewer - v3 with WebSocket Animation Loading</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    #canvas-container {
+      width: 100vw;
+      height: 100vh;
+    }
+    
+    #controls {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.85);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      max-width: 380px;
+      max-height: calc(100vh - 40px);
+      overflow-y: auto;
+      z-index: 100;
+      font-size: 13px;
+    }
+    
+    #controls h2 {
+      margin-top: 0;
+      font-size: 18px;
+      border-bottom: 2px solid #667eea;
+      padding-bottom: 8px;
+    }
+    
+    #controls .section {
+      margin: 15px 0;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 5px;
+    }
+    
+    #controls .status {
+      margin: 10px 0;
+      padding: 8px;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+    
+    #controls .status.connected { background: #2ecc71; }
+    #controls .status.disconnected { background: #e74c3c; }
+    #controls .status.info { background: #3498db; }
+    
+    #controls button {
+      background: #3498db;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin: 3px;
+      font-size: 12px;
+      width: calc(50% - 6px);
+    }
+    
+    #controls button:hover {
+      background: #2980b9;
+    }
+    
+    #controls button.full-width {
+      width: calc(100% - 6px);
+    }
+    
+    #controls button.emotion-btn {
+      width: calc(33% - 6px);
+      font-size: 11px;
+    }
+    
+    #controls input[type="file"] {
+      display: block;
+      margin: 8px 0;
+      color: white;
+      font-size: 11px;
+    }
+    
+    #controls label {
+      display: block;
+      margin-top: 10px;
+      font-weight: bold;
+      font-size: 12px;
+    }
+    
+    #controls small {
+      display: block;
+      opacity: 0.7;
+      font-size: 11px;
+      margin-top: 3px;
+    }
+    
+    .info-box {
+      margin-top: 8px;
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.1);
+      padding: 8px;
+      border-radius: 5px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    
+    .animation-item {
+      padding: 4px;
+      margin: 2px 0;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    
+    .animation-item:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+    
+    .animation-item.active {
+      background: #3498db;
+    }
+    
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 24px;
+      text-align: center;
+      z-index: 50;
+      background: rgba(0, 0, 0, 0.8);
+      padding: 30px;
+      border-radius: 10px;
+    }
+    
+    .hidden {
+      display: none;
+    }
+    
+    #debug-log {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #0f0;
+      padding: 10px;
+      border-radius: 5px;
+      font-family: monospace;
+      font-size: 10px;
+      max-width: 400px;
+      max-height: 150px;
+      overflow-y: auto;
+      z-index: 100;
+    }
+    
+    #toggle-debug {
+      position: absolute;
+      bottom: 20px;
+      left: 430px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      border: none;
+      padding: 5px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 10px;
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div>Loading VRM Viewer...</div>
+    <div style="font-size: 14px; margin-top: 10px;">v3 - WebSocket Animation Support</div>
+  </div>
+
+  <div id="controls">
+    <h2>🎭 VRM Viewer v3</h2>
+    
+    <div class="section">
+      <div id="ws-status" class="status disconnected">
+        WebSocket: Disconnected
+      </div>
+      
+      <div id="model-status" class="status info">
+        Model: Not Loaded
+      </div>
+    </div>
+    
+    <div class="section">
+      <label for="vrm-file-input">📂 Load VRM Model:</label>
+      <input type="file" id="vrm-file-input" accept=".vrm" />
+      
+      <label for="animation-files-input">🎬 Load Animations (optional):</label>
+      <input type="file" id="animation-files-input" accept=".vrma,.glb,.gltf" multiple />
+      <small>Animations can also be sent via WebSocket</small>
+    </div>
+    
+    <div class="section">
+      <strong>🎭 Test Emotions:</strong>
+      <div style="margin-top: 5px;">
+        <button class="emotion-btn" onclick="testEmotion('happy')">😊 Happy</button>
+        <button class="emotion-btn" onclick="testEmotion('sad')">😢 Sad</button>
+        <button class="emotion-btn" onclick="testEmotion('angry')">😠 Angry</button>
+        <button class="emotion-btn" onclick="testEmotion('surprised')">😲 Surprised</button>
+        <button class="emotion-btn" onclick="testEmotion('neutral')">😐 Neutral</button>
+        <button class="emotion-btn" onclick="testEmotion('excited')">🎉 Excited</button>
+      </div>
+    </div>
+    
+    <div class="section">
+      <button id="test-visemes-btn">Test Visemes</button>
+      <button id="test-animations-btn">Test Animation</button>
+      <button id="reset-all-btn" class="full-width">Reset All</button>
+    </div>
+    
+    <div class="section">
+      <strong>Status:</strong>
+      <div style="margin-top: 5px; font-size: 11px;">
+        <div>Viseme: <span id="current-viseme">None</span></div>
+        <div>Emotion: <span id="current-emotion">neutral</span></div>
+        <div>Animation: <span id="current-animation">None</span></div>
+        <div>Expressions: <span id="expression-count">0</span></div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <strong>📦 Loaded Animations: <span id="animation-count">0</span></strong>
+      <div id="animation-list" class="info-box"></div>
+    </div>
+    
+    <div class="section">
+      <strong>🎭 Available Expressions:</strong>
+      <div id="expression-list" class="info-box"></div>
+    </div>
+  </div>
+
+  <div id="debug-log">
+    <strong>Debug Log:</strong><br>
+    <div id="log-content"></div>
+  </div>
+  
+  <button id="toggle-debug" onclick="toggleDebug()">Toggle Debug</button>
+
+  <div id="canvas-container"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.1.5/lib/three-vrm.module.js",
+        "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.1.5/lib/three-vrm-animation.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+    import { createVRMAnimationClip, VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
+
+    // ========================================================================
+    // Debug Logging
+    // ========================================================================
+    const maxLogLines = 30;
+    let logLines = [];
+    let debugVisible = true;
+    
+    window.toggleDebug = function() {
+      debugVisible = !debugVisible;
+      document.getElementById('debug-log').style.display = debugVisible ? 'block' : 'none';
+    };
+    
+    function debugLog(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      const line = `[${timestamp}] ${message}`;
+      console.log(line);
+      logLines.push(line);
+      if (logLines.length > maxLogLines) logLines.shift();
+      document.getElementById('log-content').innerHTML = logLines.join('<br>');
+      // Auto-scroll to bottom
+      const logDiv = document.getElementById('debug-log');
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    // ========================================================================
+    // Global State
+    // ========================================================================
+    let currentVRM = null;
+    let currentVisemeAnimation = null;
+    let mixer = null;
+    let loadedAnimations = new Map(); // name -> { clip, vrmAnimation }
+    let currentAnimationAction = null;
+    
+    const EMOTION_TO_ANIMATION = {
+      'neutral': ['idle', 'standing'],
+      'happy': ['happy', 'wave', 'dance', 'excited'],
+      'excited': ['excited', 'happy', 'jump', 'wave'],
+      'sad': ['sad', 'idle'],
+      'tired': ['tired', 'sad', 'idle'],
+      'angry': ['angry', 'idle'],
+      'surprised': ['surprised', 'jump', 'idle'],
+      'confused': ['confused', 'idle'],
+      'sarcastic': ['idle'],
+      'playful': ['playful', 'happy', 'wave'],
+    };
+
+    // ========================================================================
+    // WebSocket Setup
+    // ========================================================================
+    let ws = null;
+    let reconnectInterval = null;
+    const WS_URL = 'ws://localhost:8765';
+    
+    function connectWebSocket() {
+      try {
+        ws = new WebSocket(WS_URL);
+        
+        ws.onopen = () => {
+          debugLog('✓ WebSocket connected');
+          document.getElementById('ws-status').textContent = 'WebSocket: Connected ✓';
+          document.getElementById('ws-status').className = 'status connected';
+          if (reconnectInterval) {
+            clearInterval(reconnectInterval);
+            reconnectInterval = null;
+          }
+        };
+        
+        ws.onclose = () => {
+          debugLog('✗ WebSocket disconnected');
+          document.getElementById('ws-status').textContent = 'WebSocket: Disconnected (retrying...)';
+          document.getElementById('ws-status').className = 'status disconnected';
+          
+          if (!reconnectInterval) {
+            reconnectInterval = setInterval(() => {
+              debugLog('Reconnecting...');
+              connectWebSocket();
+            }, 3000);
+          }
+        };
+        
+        ws.onerror = (error) => {
+          debugLog('WebSocket error');
+        };
+        
+        ws.onmessage = async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            // Handle different message types
+            switch (data.type) {
+              case 'viseme_sequence':
+                debugLog(`Visemes: ${data.visemes?.length || 0}, emotion: ${data.emotion}`);
+                if (data.emotion) {
+                  setEmotion(data.emotion);
+                }
+                animateVisemeSequence(data.visemes, data.audio_duration, data.emotion);
+                break;
+                
+              case 'emotion':
+                debugLog(`Emotion: ${data.emotion}`);
+                setEmotion(data.emotion);
+                playAnimationForEmotion(data.emotion);
+                break;
+                
+              case 'animation':
+                debugLog(`Animation by name: ${data.animation_name}`);
+                playAnimationByName(data.animation_name);
+                break;
+                
+              case 'animation_file':
+                debugLog(`Animation file received: ${data.name}`);
+                await loadAnimationFromBase64(data.name, data.data);
+                playAnimationByName(data.name);
+                break;
+                
+              case 'expression':
+                debugLog(`Expression: ${data.name} = ${data.value}`);
+                setDirectExpression(data.name, data.value || 1.0);
+                break;
+                
+              default:
+                debugLog(`Unknown message type: ${data.type}`);
+            }
+          } catch (error) {
+            debugLog(`Error: ${error.message}`);
+          }
+        };
+        
+      } catch (error) {
+        debugLog(`WebSocket error: ${error}`);
+      }
+    }
+    
+    connectWebSocket();
+
+    // ========================================================================
+    // Three.js Scene Setup
+    // ========================================================================
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x212121);
+    
+    const camera = new THREE.PerspectiveCamera(
+      30,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      100
+    );
+    camera.position.set(0, 1.4, 2.5);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    directionalLight.position.set(1, 2, 1);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+    
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    
+    const rimLight = new THREE.DirectionalLight(0x6699ff, 0.5);
+    rimLight.position.set(-1, 1, -1);
+    scene.add(rimLight);
+    
+    const groundGeometry = new THREE.PlaneGeometry(10, 10);
+    const groundMaterial = new THREE.ShadowMaterial({ opacity: 0.3 });
+    const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+    
+    const gridHelper = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
+    scene.add(gridHelper);
+    
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.2, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.update();
+    
+    // ========================================================================
+    // GLTF Loader with VRM plugins
+    // ========================================================================
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+    loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+    
+    // ========================================================================
+    // VRM Model Loading
+    // ========================================================================
+    function loadVRM(file) {
+      const url = URL.createObjectURL(file);
+      
+      document.getElementById('loading').classList.remove('hidden');
+      document.getElementById('model-status').textContent = 'Model: Loading...';
+      
+      loader.load(
+        url,
+        (gltf) => {
+          if (currentVRM) {
+            scene.remove(currentVRM.scene);
+            VRMUtils.deepDispose(currentVRM.scene);
+            if (mixer) {
+              mixer.stopAllAction();
+              mixer = null;
+            }
+          }
+          
+          const vrm = gltf.userData.vrm;
+          currentVRM = vrm;
+          
+          mixer = new THREE.AnimationMixer(vrm.scene);
+          
+          scene.add(vrm.scene);
+          
+          vrm.scene.traverse((object) => {
+            if (object.isMesh) {
+              object.castShadow = true;
+              object.receiveShadow = true;
+            }
+            object.frustumCulled = false;
+          });
+          
+          vrm.scene.rotation.y = Math.PI;
+          
+          const box = new THREE.Box3().setFromObject(vrm.scene);
+          vrm.scene.position.y = -box.min.y;
+          
+          // Log expressions
+          const expressionNames = Object.keys(vrm.expressionManager?.expressionMap || {});
+          document.getElementById('expression-count').textContent = expressionNames.length;
+          
+          const expressionListDiv = document.getElementById('expression-list');
+          expressionListDiv.innerHTML = expressionNames.length > 0 
+            ? expressionNames.map(name => `<span style="background:#333;padding:2px 4px;margin:1px;display:inline-block;font-size:9px;">${name}</span>`).join(' ')
+            : '<div style="opacity: 0.5;">No expressions found</div>';
+          
+          debugLog(`VRM loaded: ${expressionNames.length} expressions`);
+          
+          document.getElementById('loading').classList.add('hidden');
+          document.getElementById('model-status').textContent = 'Model: Loaded ✓';
+          document.getElementById('model-status').className = 'status connected';
+          
+          // Rebind animations
+          rebindAnimationsToVRM();
+          
+          URL.revokeObjectURL(url);
+        },
+        (progress) => {
+          const percent = (progress.loaded / progress.total * 100).toFixed(1);
+          document.getElementById('model-status').textContent = `Loading: ${percent}%`;
+        },
+        (error) => {
+          debugLog(`VRM load error: ${error}`);
+          document.getElementById('loading').classList.add('hidden');
+          document.getElementById('model-status').textContent = 'Model: Load Failed ✗';
+          document.getElementById('model-status').className = 'status disconnected';
+          URL.revokeObjectURL(url);
+        }
+      );
+    }
+    
+    document.getElementById('vrm-file-input').addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (file) loadVRM(file);
+    });
+    
+    // ========================================================================
+    // Animation Loading
+    // ========================================================================
+    
+    /**
+     * Load animation from base64 data (sent via WebSocket)
+     */
+    async function loadAnimationFromBase64(name, base64Data) {
+      return new Promise((resolve, reject) => {
+        try {
+          // Decode base64 to binary
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          
+          // Create blob and URL
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          
+          loader.load(
+            url,
+            (gltf) => {
+              // Check for VRMA animation
+              if (gltf.userData.vrmAnimations && gltf.userData.vrmAnimations.length > 0) {
+                const vrmAnimation = gltf.userData.vrmAnimations[0];
+                
+                // Store the animation
+                loadedAnimations.set(name, {
+                  type: 'vrma',
+                  vrmAnimation: vrmAnimation,
+                  clip: null
+                });
+                
+                // Bind to current VRM if loaded
+                if (currentVRM) {
+                  try {
+                    const clip = createVRMAnimationClip(vrmAnimation, currentVRM);
+                    loadedAnimations.get(name).clip = clip;
+                    debugLog(`Animation bound: ${name}`);
+                  } catch (e) {
+                    debugLog(`Bind error: ${e.message}`);
+                  }
+                }
+                
+                updateAnimationList();
+                resolve(name);
+              } else {
+                debugLog(`No VRMA data in: ${name}`);
+                reject(new Error('No VRMA animation data'));
+              }
+              
+              URL.revokeObjectURL(url);
+            },
+            undefined,
+            (error) => {
+              debugLog(`Load error: ${error}`);
+              URL.revokeObjectURL(url);
+              reject(error);
+            }
+          );
+        } catch (error) {
+          debugLog(`Decode error: ${error}`);
+          reject(error);
+        }
+      });
+    }
+    
+    /**
+     * Load animation from file input
+     */
+    async function loadAnimationFromFile(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const fileName = file.name.replace(/\.(vrma|glb|gltf)$/i, '');
+        
+        debugLog(`Loading file: ${file.name}`);
+        
+        loader.load(
+          url,
+          (gltf) => {
+            if (gltf.userData.vrmAnimations && gltf.userData.vrmAnimations.length > 0) {
+              gltf.userData.vrmAnimations.forEach((vrmAnimation, index) => {
+                const animName = vrmAnimation.name || `${fileName}_${index}`;
+                loadedAnimations.set(animName, {
+                  type: 'vrma',
+                  vrmAnimation: vrmAnimation,
+                  clip: null
+                });
+                debugLog(`Loaded: ${animName}`);
+              });
+            } else if (gltf.animations && gltf.animations.length > 0) {
+              gltf.animations.forEach((clip, index) => {
+                const animName = clip.name || `${fileName}_${index}`;
+                loadedAnimations.set(animName, {
+                  type: 'glb',
+                  originalClip: clip,
+                  clip: null
+                });
+                debugLog(`Loaded GLB: ${animName}`);
+              });
+            }
+            
+            URL.revokeObjectURL(url);
+            
+            if (currentVRM) {
+              rebindAnimationsToVRM();
+            }
+            
+            resolve();
+          },
+          undefined,
+          (error) => {
+            debugLog(`Error: ${error}`);
+            URL.revokeObjectURL(url);
+            reject(error);
+          }
+        );
+      });
+    }
+    
+    function rebindAnimationsToVRM() {
+      if (!currentVRM) return;
+      
+      debugLog('Rebinding animations...');
+      
+      loadedAnimations.forEach((animData, name) => {
+        try {
+          if (animData.type === 'vrma' && animData.vrmAnimation) {
+            animData.clip = createVRMAnimationClip(animData.vrmAnimation, currentVRM);
+            debugLog(`  Bound: ${name}`);
+          }
+        } catch (error) {
+          debugLog(`  Error binding ${name}: ${error.message}`);
+        }
+      });
+      
+      updateAnimationList();
+    }
+    
+    document.getElementById('animation-files-input').addEventListener('change', async (event) => {
+      const files = Array.from(event.target.files);
+      
+      for (const file of files) {
+        try {
+          await loadAnimationFromFile(file);
+        } catch (error) {
+          debugLog(`Failed: ${file.name}`);
+        }
+      }
+      
+      updateAnimationList();
+    });
+    
+    function updateAnimationList() {
+      const listDiv = document.getElementById('animation-list');
+      const countSpan = document.getElementById('animation-count');
+      
+      countSpan.textContent = loadedAnimations.size;
+      
+      if (loadedAnimations.size === 0) {
+        listDiv.innerHTML = '<div style="opacity: 0.5;">No animations loaded</div>';
+        return;
+      }
+      
+      listDiv.innerHTML = '';
+      loadedAnimations.forEach((animData, name) => {
+        const item = document.createElement('div');
+        item.className = 'animation-item';
+        const status = animData.clip ? '✓' : '⚠';
+        const type = animData.type.toUpperCase();
+        item.textContent = `${status} [${type}] ${name}`;
+        item.onclick = () => playAnimationByName(name);
+        listDiv.appendChild(item);
+      });
+    }
+    
+    // ========================================================================
+    // Animation Playback
+    // ========================================================================
+    
+    function playAnimationByName(animationName) {
+      if (!currentVRM || !mixer) {
+        debugLog('Cannot play: No VRM');
+        return;
+      }
+      
+      const animData = loadedAnimations.get(animationName);
+      if (!animData || !animData.clip) {
+        debugLog(`Animation not found/bound: ${animationName}`);
+        return;
+      }
+      
+      // Fade out current
+      if (currentAnimationAction) {
+        currentAnimationAction.fadeOut(0.5);
+      }
+      
+      // Play new
+      const action = mixer.clipAction(animData.clip);
+      action.reset();
+      action.fadeIn(0.5);
+      action.play();
+      
+      currentAnimationAction = action;
+      document.getElementById('current-animation').textContent = animationName;
+      
+      debugLog(`Playing: ${animationName}`);
+    }
+    
+    function playAnimationForEmotion(emotion) {
+      const candidates = EMOTION_TO_ANIMATION[emotion] || EMOTION_TO_ANIMATION['neutral'];
+      
+      for (const animName of candidates) {
+        // Look for partial match in loaded animations
+        for (const [loadedName, animData] of loadedAnimations) {
+          if (loadedName.toLowerCase().includes(animName.toLowerCase()) && animData.clip) {
+            playAnimationByName(loadedName);
+            return;
+          }
+        }
+      }
+      
+      // No match found - play first available
+      for (const [name, animData] of loadedAnimations) {
+        if (animData.clip) {
+          playAnimationByName(name);
+          return;
+        }
+      }
+    }
+    
+    // ========================================================================
+    // Viseme System
+    // ========================================================================
+    
+    const VISEME_TO_VRM = {
+      'aa': ['aa', 'a', 'A', 'Fcl_MTH_A'],
+      'ih': ['ih', 'i', 'I', 'Fcl_MTH_I'],
+      'oh': ['oh', 'o', 'O', 'u', 'U', 'Fcl_MTH_O', 'Fcl_MTH_U'],
+      'eh': ['eh', 'e', 'E', 'Fcl_MTH_E'],
+      'PP': ['aa', 'a'],
+      'FF': ['ih', 'i'],
+      'TH': ['aa', 'a'],
+      'DD': ['aa', 'a'],
+      'SS': ['ih', 'i'],
+      'CH': ['ih', 'i'],
+      'kk': ['aa', 'a'],
+      'RR': ['oh', 'o'],
+      'rr': ['oh', 'o'],
+      'neutral': ['neutral'],
+      'sil': ['neutral'],
+    };
+    
+    const MOUTH_EXPRESSIONS = ['a', 'i', 'u', 'e', 'o', 'aa', 'ih', 'oh', 'eh', 'neutral',
+                               'Fcl_MTH_A', 'Fcl_MTH_I', 'Fcl_MTH_U', 'Fcl_MTH_E', 'Fcl_MTH_O'];
+    
+    function findExpression(visemeName) {
+      if (!currentVRM?.expressionManager) return null;
+      
+      const expressions = currentVRM.expressionManager.expressionMap;
+      const candidates = VISEME_TO_VRM[visemeName] || ['neutral'];
+      
+      for (const candidate of candidates) {
+        if (expressions[candidate]) return candidate;
+      }
+      return null;
+    }
+    
+    function setViseme(visemeName, weight = 1.0) {
+      if (!currentVRM?.expressionManager) return;
+      
+      const em = currentVRM.expressionManager;
+      const expressions = em.expressionMap;
+      
+      // Reset mouth expressions
+      for (const name of MOUTH_EXPRESSIONS) {
+        if (expressions[name]) em.setValue(name, 0);
+      }
+      
+      const expr = findExpression(visemeName);
+      if (expr) {
+        em.setValue(expr, weight);
+        document.getElementById('current-viseme').textContent = `${visemeName} → ${expr}`;
+      }
+    }
+    
+    function animateVisemeSequence(visemes, audioDuration, emotion) {
+      if (!currentVRM || !visemes || visemes.length === 0) return;
+      
+      if (currentVisemeAnimation) {
+        cancelAnimationFrame(currentVisemeAnimation);
+      }
+      
+      const timePerViseme = audioDuration / visemes.length;
+      let currentIndex = -1;
+      const startTime = performance.now() / 1000;
+      
+      function loop() {
+        const elapsed = performance.now() / 1000 - startTime;
+        const targetIndex = Math.floor(elapsed / timePerViseme);
+        
+        if (targetIndex >= visemes.length) {
+          setViseme('neutral', 0);
+          currentVisemeAnimation = null;
+          document.getElementById('current-viseme').textContent = 'None';
+          return;
+        }
+        
+        if (targetIndex !== currentIndex) {
+          currentIndex = targetIndex;
+          setViseme(visemes[currentIndex], 1.0);
+        }
+        
+        currentVisemeAnimation = requestAnimationFrame(loop);
+      }
+      
+      loop();
+    }
+    
+    // ========================================================================
+    // Emotion System
+    // ========================================================================
+    
+    const EMOTION_TO_EXPRESSION = {
+      'neutral': ['neutral', 'Neutral'],
+      'happy': ['happy', 'joy', 'fun', 'smile', 'Happy', 'Joy', 'Fcl_ALL_Joy'],
+      'excited': ['happy', 'joy', 'surprised', 'Happy'],
+      'sad': ['sad', 'sorrow', 'Sad', 'Fcl_ALL_Sorrow'],
+      'angry': ['angry', 'anger', 'Angry', 'Fcl_ALL_Angry'],
+      'surprised': ['surprised', 'surprise', 'Surprised', 'Fcl_ALL_Surprised'],
+      'confused': ['neutral'],
+      'sarcastic': ['neutral'],
+      'playful': ['happy', 'fun', 'Happy'],
+      'tired': ['sad', 'neutral'],
+    };
+    
+    const EMOTION_EXPRESSIONS = ['happy', 'joy', 'fun', 'sad', 'sorrow', 'angry', 'anger', 
+                                  'surprised', 'surprise', 'neutral',
+                                  'Fcl_ALL_Joy', 'Fcl_ALL_Sorrow', 'Fcl_ALL_Angry', 'Fcl_ALL_Surprised'];
+    
+    function setEmotion(emotion) {
+      if (!currentVRM?.expressionManager) {
+        debugLog(`Cannot set emotion: No VRM`);
+        return;
+      }
+      
+      const em = currentVRM.expressionManager;
+      const expressions = em.expressionMap;
+      
+      // Reset emotion expressions
+      for (const name of EMOTION_EXPRESSIONS) {
+        if (expressions[name]) em.setValue(name, 0);
+      }
+      
+      // Set new emotion
+      const candidates = EMOTION_TO_EXPRESSION[emotion.toLowerCase()] || ['neutral'];
+      
+      for (const candidate of candidates) {
+        if (expressions[candidate]) {
+          em.setValue(candidate, 1.0);
+          debugLog(`Expression set: ${candidate}`);
+          break;
+        }
+      }
+      
+      document.getElementById('current-emotion').textContent = emotion;
+    }
+    
+    function setDirectExpression(name, value) {
+      if (!currentVRM?.expressionManager) return;
+      const expressions = currentVRM.expressionManager.expressionMap;
+      if (expressions[name]) {
+        currentVRM.expressionManager.setValue(name, value);
+      }
+    }
+    
+    // Global function for buttons
+    window.testEmotion = function(emotion) {
+      if (!currentVRM) {
+        alert('Load a VRM model first!');
+        return;
+      }
+      setEmotion(emotion);
+      playAnimationForEmotion(emotion);
+    };
+    
+    // ========================================================================
+    // Test Buttons
+    // ========================================================================
+    
+    document.getElementById('test-visemes-btn').addEventListener('click', () => {
+      if (!currentVRM) {
+        alert('Load VRM model first!');
+        return;
+      }
+      
+      const testVisemes = ['aa', 'ih', 'oh', 'eh', 'PP', 'FF', 'DD', 'SS', 'neutral'];
+      animateVisemeSequence(testVisemes, testVisemes.length * 0.3);
+    });
+    
+    document.getElementById('test-animations-btn').addEventListener('click', () => {
+      if (!currentVRM) {
+        alert('Load VRM model first!');
+        return;
+      }
+      
+      if (loadedAnimations.size === 0) {
+        alert('No animations loaded!');
+        return;
+      }
+      
+      // Play first available
+      for (const [name, animData] of loadedAnimations) {
+        if (animData.clip) {
+          playAnimationByName(name);
+          break;
+        }
+      }
+    });
+    
+    document.getElementById('reset-all-btn').addEventListener('click', () => {
+      if (currentVisemeAnimation) {
+        cancelAnimationFrame(currentVisemeAnimation);
+        currentVisemeAnimation = null;
+      }
+      if (currentAnimationAction) {
+        currentAnimationAction.fadeOut(0.3);
+        currentAnimationAction = null;
+      }
+      if (currentVRM?.expressionManager) {
+        const expressions = currentVRM.expressionManager.expressionMap;
+        for (const name of Object.keys(expressions)) {
+          currentVRM.expressionManager.setValue(name, 0);
+        }
+      }
+      document.getElementById('current-viseme').textContent = 'None';
+      document.getElementById('current-emotion').textContent = 'neutral';
+      document.getElementById('current-animation').textContent = 'None';
+      debugLog('Reset all');
+    });
+    
+    // ========================================================================
+    // Animation Loop
+    // ========================================================================
+    
+    const clock = new THREE.Clock();
+    
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const deltaTime = clock.getDelta();
+      
+      if (mixer) {
+        mixer.update(deltaTime);
+      }
+      
+      if (currentVRM) {
+        currentVRM.update(deltaTime);
+      }
+      
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    
+    animate();
+    
+    // ========================================================================
+    // Window Resize
+    // ========================================================================
+    
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    
+    setTimeout(() => {
+      document.getElementById('loading').classList.add('hidden');
+    }, 1000);
+    
+    debugLog('VRM Viewer v3 initialized');
+    debugLog('Waiting for WebSocket animations...');
+  </script>
+</body>
+</html>

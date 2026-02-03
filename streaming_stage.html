@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VTuber Stage - OBS Ready</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      overflow: hidden;
+      font-family: 'Segoe UI', Arial, sans-serif;
+    }
+    
+    #canvas-container {
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+    }
+    
+    /* Background modes */
+    body.bg-transparent {
+      background: transparent !important;
+    }
+    
+    body.bg-green {
+      background: #00ff00 !important;
+    }
+    
+    body.bg-blue {
+      background: #0000ff !important;
+    }
+    
+    body.bg-magenta {
+      background: #ff00ff !important;
+    }
+    
+    body.bg-black {
+      background: #000000 !important;
+    }
+    
+    body.bg-image {
+      background-size: cover !important;
+      background-position: center !important;
+      background-repeat: no-repeat !important;
+    }
+    
+    /* Control Panel */
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.85);
+      color: white;
+      padding: 15px;
+      border-radius: 8px;
+      font-size: 12px;
+      z-index: 1000;
+      max-width: 300px;
+      transition: opacity 0.3s, transform 0.3s;
+    }
+    
+    #controls.hidden {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-100%);
+    }
+    
+    #controls h3 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      border-bottom: 1px solid #444;
+      padding-bottom: 5px;
+    }
+    
+    .control-section {
+      margin: 10px 0;
+    }
+    
+    .control-section label {
+      display: block;
+      margin-bottom: 4px;
+      font-weight: bold;
+      font-size: 11px;
+      color: #aaa;
+    }
+    
+    .control-row {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-bottom: 5px;
+    }
+    
+    button {
+      background: #2a2a2a;
+      color: white;
+      border: 1px solid #444;
+      padding: 6px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background 0.2s;
+    }
+    
+    button:hover {
+      background: #3a3a3a;
+    }
+    
+    button.active {
+      background: #0066cc;
+      border-color: #0088ff;
+    }
+    
+    input[type="file"] {
+      font-size: 10px;
+      margin-top: 5px;
+    }
+    
+    input[type="color"] {
+      width: 40px;
+      height: 25px;
+      border: none;
+      cursor: pointer;
+    }
+    
+    .status-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+    
+    .status-connected {
+      background: #00ff00;
+      box-shadow: 0 0 5px #00ff00;
+    }
+    
+    .status-disconnected {
+      background: #ff0000;
+      box-shadow: 0 0 5px #ff0000;
+    }
+    
+    #status-bar {
+      font-size: 10px;
+      padding: 8px;
+      background: rgba(0,0,0,0.5);
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    
+    /* Hide hint */
+    #hide-hint {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.7);
+      color: #888;
+      padding: 5px 10px;
+      border-radius: 4px;
+      font-size: 10px;
+      z-index: 999;
+      transition: opacity 0.3s;
+    }
+    
+    #hide-hint.hidden {
+      opacity: 0;
+    }
+    
+    /* Loading overlay */
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.9);
+      color: white;
+      padding: 30px 50px;
+      border-radius: 10px;
+      text-align: center;
+      z-index: 2000;
+    }
+    
+    #loading.hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body class="bg-transparent">
+  
+  <div id="loading">
+    <div style="font-size: 18px; margin-bottom: 10px;">🎭 VTuber Stage</div>
+    <div style="font-size: 12px; color: #888;">Loading...</div>
+  </div>
+
+  <div id="controls">
+    <h3>🎭 VTuber Stage</h3>
+    
+    <div class="control-section">
+      <label>Load Model</label>
+      <input type="file" id="vrm-input" accept=".vrm" />
+    </div>
+    
+    <div class="control-section">
+      <label>Load Animations (Optional)</label>
+      <input type="file" id="anim-input" accept=".vrma" multiple />
+    </div>
+    
+    <div class="control-section">
+      <label>Background</label>
+      <div class="control-row">
+        <button id="bg-transparent" class="active">Transparent</button>
+        <button id="bg-green">Green</button>
+        <button id="bg-blue">Blue</button>
+        <button id="bg-magenta">Magenta</button>
+      </div>
+      <div class="control-row">
+        <button id="bg-black">Black</button>
+        <input type="color" id="bg-color-picker" value="#000000" title="Custom Color">
+        <button id="bg-image-btn">Image...</button>
+      </div>
+      <input type="file" id="bg-image-input" accept="image/*" style="display:none;">
+    </div>
+    
+    <div id="status-bar">
+      <div>
+        <span id="ws-indicator" class="status-indicator status-disconnected"></span>
+        <span id="ws-status">Disconnected</span>
+      </div>
+      <div style="margin-top: 4px;">
+        Model: <span id="model-status">Not loaded</span>
+      </div>
+      <div style="margin-top: 4px;">
+        Animation: <span id="anim-status">None</span>
+      </div>
+    </div>
+  </div>
+  
+  <div id="hide-hint">Press H to hide/show controls</div>
+  
+  <div id="canvas-container"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.1.5/lib/three-vrm.module.js",
+        "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.1.5/lib/three-vrm-animation.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+    import { createVRMAnimationClip, VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
+
+    // ========================================================================
+    // State
+    // ========================================================================
+    let currentVRM = null;
+    let mixer = null;
+    let loadedAnimations = new Map();
+    let currentAnimationAction = null;
+    let currentVisemeAnimation = null;
+    let controlsVisible = true;
+
+    // ========================================================================
+    // Three.js Setup
+    // ========================================================================
+    const scene = new THREE.Scene();
+    // Transparent background for OBS
+    scene.background = null;
+    
+    const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.4, 2.5);
+    
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true,
+      alpha: true,  // Enable transparency
+      premultipliedAlpha: false
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(0x000000, 0);  // Transparent
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+    
+    // Lighting
+    const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    mainLight.position.set(1, 2, 1);
+    scene.add(mainLight);
+    
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    
+    const rimLight = new THREE.DirectionalLight(0x6699ff, 0.4);
+    rimLight.position.set(-1, 1, -1);
+    scene.add(rimLight);
+    
+    // Optional: floor for shadows (hidden by default for transparency)
+    const floorGeometry = new THREE.PlaneGeometry(10, 10);
+    const floorMaterial = new THREE.ShadowMaterial({ opacity: 0 });
+    const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+    floor.rotation.x = -Math.PI / 2;
+    floor.visible = false;
+    scene.add(floor);
+    
+    // Controls (for setup, can be disabled in production)
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.2, 0);
+    controls.enableDamping = true;
+    controls.update();
+
+    // ========================================================================
+    // GLTF Loader
+    // ========================================================================
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+    loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+
+    // ========================================================================
+    // VRM Loading
+    // ========================================================================
+    function loadVRM(file) {
+      const url = URL.createObjectURL(file);
+      document.getElementById('model-status').textContent = 'Loading...';
+      
+      loader.load(url, (gltf) => {
+        if (currentVRM) {
+          scene.remove(currentVRM.scene);
+          VRMUtils.deepDispose(currentVRM.scene);
+          if (mixer) mixer.stopAllAction();
+        }
+        
+        currentVRM = gltf.userData.vrm;
+        mixer = new THREE.AnimationMixer(currentVRM.scene);
+        scene.add(currentVRM.scene);
+        
+        currentVRM.scene.traverse((obj) => {
+          if (obj.isMesh) {
+            obj.castShadow = true;
+            obj.receiveShadow = true;
+          }
+          obj.frustumCulled = false;
+        });
+        
+        currentVRM.scene.rotation.y = Math.PI;
+        
+        const box = new THREE.Box3().setFromObject(currentVRM.scene);
+        currentVRM.scene.position.y = -box.min.y;
+        
+        document.getElementById('model-status').textContent = 'Loaded ✓';
+        document.getElementById('loading').classList.add('hidden');
+        
+        rebindAnimations();
+        URL.revokeObjectURL(url);
+      }, undefined, (error) => {
+        console.error('VRM load error:', error);
+        document.getElementById('model-status').textContent = 'Error!';
+        URL.revokeObjectURL(url);
+      });
+    }
+
+    document.getElementById('vrm-input').addEventListener('change', (e) => {
+      if (e.target.files[0]) loadVRM(e.target.files[0]);
+    });
+
+    // ========================================================================
+    // Animation Loading
+    // ========================================================================
+    async function loadAnimationFromBase64(name, base64Data) {
+      return new Promise((resolve, reject) => {
+        try {
+          const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+          const blob = new Blob([bytes], { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          
+          loader.load(url, (gltf) => {
+            if (gltf.userData.vrmAnimations?.length > 0) {
+              const vrmAnim = gltf.userData.vrmAnimations[0];
+              loadedAnimations.set(name, { vrmAnimation: vrmAnim, clip: null });
+              
+              if (currentVRM) {
+                try {
+                  const clip = createVRMAnimationClip(vrmAnim, currentVRM);
+                  loadedAnimations.get(name).clip = clip;
+                } catch (e) {}
+              }
+              resolve(name);
+            } else {
+              reject(new Error('No animation data'));
+            }
+            URL.revokeObjectURL(url);
+          }, undefined, (err) => {
+            URL.revokeObjectURL(url);
+            reject(err);
+          });
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }
+
+    function rebindAnimations() {
+      if (!currentVRM) return;
+      loadedAnimations.forEach((data, name) => {
+        if (data.vrmAnimation) {
+          try {
+            data.clip = createVRMAnimationClip(data.vrmAnimation, currentVRM);
+          } catch (e) {}
+        }
+      });
+    }
+
+    document.getElementById('anim-input').addEventListener('change', async (e) => {
+      for (const file of e.target.files) {
+        const reader = new FileReader();
+        reader.onload = async (ev) => {
+          const base64 = ev.target.result.split(',')[1];
+          const name = file.name.replace(/\.vrma$/i, '');
+          await loadAnimationFromBase64(name, base64);
+          // Play the animation immediately after loading
+          playAnimation(name);
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+
+    // ========================================================================
+    // Animation Playback
+    // ========================================================================
+    function playAnimation(name) {
+      if (!currentVRM || !mixer) return;
+      
+      const data = loadedAnimations.get(name);
+      if (!data?.clip) return;
+      
+      if (currentAnimationAction) {
+        currentAnimationAction.fadeOut(0.3);
+      }
+      
+      const action = mixer.clipAction(data.clip);
+      action.reset();
+      action.fadeIn(0.3);
+      action.play();
+      currentAnimationAction = action;
+      
+      document.getElementById('anim-status').textContent = name;
+    }
+
+    // ========================================================================
+    // Expression/Emotion System
+    // ========================================================================
+    const EMOTION_MAP = {
+      'neutral': ['neutral'],
+      'happy': ['happy', 'joy', 'fun', 'smile', 'Happy', 'Joy'],
+      'excited': ['happy', 'joy', 'surprised'],
+      'sad': ['sad', 'sorrow', 'Sad'],
+      'angry': ['angry', 'anger', 'Angry'],
+      'surprised': ['surprised', 'surprise', 'Surprised'],
+      'confused': ['neutral'],
+      'sarcastic': ['neutral'],
+      'playful': ['happy', 'fun'],
+      'tired': ['sad', 'neutral'],
+    };
+
+    const EMOTION_EXPRESSIONS = ['happy', 'joy', 'fun', 'sad', 'sorrow', 'angry', 
+      'surprised', 'neutral', 'anger', 'surprise'];
+
+    function setEmotion(emotion) {
+      if (!currentVRM?.expressionManager) return;
+      
+      const em = currentVRM.expressionManager;
+      const expressions = em.expressionMap;
+      
+      // Reset all emotion expressions
+      EMOTION_EXPRESSIONS.forEach(name => {
+        if (expressions[name]) em.setValue(name, 0);
+      });
+      
+      // Set new emotion
+      const candidates = EMOTION_MAP[emotion.toLowerCase()] || ['neutral'];
+      for (const candidate of candidates) {
+        if (expressions[candidate]) {
+          em.setValue(candidate, 1.0);
+          break;
+        }
+      }
+    }
+
+    // ========================================================================
+    // Viseme System
+    // ========================================================================
+    const VISEME_MAP = {
+      'aa': ['aa', 'a', 'A'], 'ih': ['ih', 'i', 'I'],
+      'oh': ['oh', 'o', 'O', 'u', 'U'], 'eh': ['eh', 'e', 'E'],
+      'PP': ['aa'], 'FF': ['ih'], 'DD': ['aa'], 'SS': ['ih'],
+      'CH': ['ih'], 'TH': ['aa'], 'kk': ['aa'], 'RR': ['oh'],
+      'neutral': ['neutral']
+    };
+
+    const MOUTH_EXPRESSIONS = ['a', 'i', 'u', 'e', 'o', 'aa', 'ih', 'oh', 'eh', 'neutral'];
+
+    function setViseme(viseme, weight = 1.0) {
+      if (!currentVRM?.expressionManager) return;
+      
+      const em = currentVRM.expressionManager;
+      const expressions = em.expressionMap;
+      
+      MOUTH_EXPRESSIONS.forEach(name => {
+        if (expressions[name]) em.setValue(name, 0);
+      });
+      
+      const candidates = VISEME_MAP[viseme] || ['neutral'];
+      for (const candidate of candidates) {
+        if (expressions[candidate]) {
+          em.setValue(candidate, weight);
+          break;
+        }
+      }
+    }
+
+    function animateVisemes(visemes, duration) {
+      if (!currentVRM || !visemes?.length) return;
+      
+      if (currentVisemeAnimation) {
+        cancelAnimationFrame(currentVisemeAnimation);
+      }
+      
+      const timePerViseme = duration / visemes.length;
+      const startTime = performance.now() / 1000;
+      let currentIndex = -1;
+      
+      function update() {
+        const elapsed = performance.now() / 1000 - startTime;
+        const targetIndex = Math.floor(elapsed / timePerViseme);
+        
+        if (targetIndex >= visemes.length) {
+          setViseme('neutral', 0);
+          currentVisemeAnimation = null;
+          return;
+        }
+        
+        if (targetIndex !== currentIndex) {
+          currentIndex = targetIndex;
+          setViseme(visemes[currentIndex], 1.0);
+        }
+        
+        currentVisemeAnimation = requestAnimationFrame(update);
+      }
+      
+      update();
+    }
+
+    // ========================================================================
+    // WebSocket Connection
+    // ========================================================================
+    let ws = null;
+    let reconnectTimer = null;
+
+    function connectWebSocket() {
+      try {
+        ws = new WebSocket('ws://localhost:8765');
+        
+        ws.onopen = () => {
+          document.getElementById('ws-indicator').className = 'status-indicator status-connected';
+          document.getElementById('ws-status').textContent = 'Connected';
+          if (reconnectTimer) {
+            clearInterval(reconnectTimer);
+            reconnectTimer = null;
+          }
+        };
+        
+        ws.onclose = () => {
+          document.getElementById('ws-indicator').className = 'status-indicator status-disconnected';
+          document.getElementById('ws-status').textContent = 'Disconnected';
+          
+          if (!reconnectTimer) {
+            reconnectTimer = setInterval(connectWebSocket, 3000);
+          }
+        };
+        
+        ws.onerror = () => {};
+        
+        ws.onmessage = async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            switch (data.type) {
+              case 'synchronized_playback':
+                // Handle synchronized animation + visemes + emotion
+                if (data.emotion) setEmotion(data.emotion);
+                
+                if (data.animation?.data) {
+                  await loadAnimationFromBase64(data.animation.name, data.animation.data);
+                  playAnimation(data.animation.name);
+                }
+                
+                if (data.visemes?.length) {
+                  animateVisemes(data.visemes, data.audio_duration || 1);
+                }
+                break;
+              
+              case 'emotion':
+                setEmotion(data.emotion);
+                break;
+              
+              case 'animation_file':
+                await loadAnimationFromBase64(data.name, data.data);
+                // Always play if play flag is true or undefined (backward compat)
+                if (data.play !== false) {
+                  playAnimation(data.name);
+                }
+                break;
+              
+              case 'viseme_sequence':
+                if (data.emotion) setEmotion(data.emotion);
+                animateVisemes(data.visemes, data.audio_duration || 1);
+                break;
+              
+              case 'stop_visemes':
+                // Immediately stop lip sync
+                if (currentVisemeAnimation) {
+                  cancelAnimationFrame(currentVisemeAnimation);
+                  currentVisemeAnimation = null;
+                }
+                setViseme('neutral', 0);
+                break;
+            }
+          } catch (e) {
+            console.error('WebSocket message error:', e);
+          }
+        };
+      } catch (e) {
+        console.error('WebSocket error:', e);
+      }
+    }
+
+    connectWebSocket();
+
+    // ========================================================================
+    // Background Controls
+    // ========================================================================
+    const bgButtons = ['transparent', 'green', 'blue', 'magenta', 'black'];
+    
+    bgButtons.forEach(bg => {
+      document.getElementById(`bg-${bg}`).addEventListener('click', () => {
+        document.body.className = `bg-${bg}`;
+        
+        // Update active button
+        bgButtons.forEach(b => {
+          document.getElementById(`bg-${b}`).classList.remove('active');
+        });
+        document.getElementById(`bg-${bg}`).classList.add('active');
+        
+        // Update renderer
+        if (bg === 'transparent') {
+          renderer.setClearColor(0x000000, 0);
+          scene.background = null;
+        } else {
+          const colors = {
+            'green': 0x00ff00,
+            'blue': 0x0000ff,
+            'magenta': 0xff00ff,
+            'black': 0x000000
+          };
+          renderer.setClearColor(colors[bg], 1);
+          scene.background = new THREE.Color(colors[bg]);
+        }
+      });
+    });
+
+    // Custom color picker
+    document.getElementById('bg-color-picker').addEventListener('input', (e) => {
+      const color = e.target.value;
+      document.body.style.background = color;
+      document.body.className = '';
+      
+      bgButtons.forEach(b => {
+        document.getElementById(`bg-${b}`).classList.remove('active');
+      });
+      
+      const threeColor = new THREE.Color(color);
+      renderer.setClearColor(threeColor, 1);
+      scene.background = threeColor;
+    });
+
+    // Background image
+    document.getElementById('bg-image-btn').addEventListener('click', () => {
+      document.getElementById('bg-image-input').click();
+    });
+
+    document.getElementById('bg-image-input').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        const url = URL.createObjectURL(file);
+        document.body.style.backgroundImage = `url(${url})`;
+        document.body.className = 'bg-image';
+        
+        bgButtons.forEach(b => {
+          document.getElementById(`bg-${b}`).classList.remove('active');
+        });
+        
+        // Keep renderer transparent so image shows through
+        renderer.setClearColor(0x000000, 0);
+        scene.background = null;
+      }
+    });
+
+    // ========================================================================
+    // Hide/Show Controls
+    // ========================================================================
+    function toggleControls() {
+      controlsVisible = !controlsVisible;
+      document.getElementById('controls').classList.toggle('hidden', !controlsVisible);
+      document.getElementById('hide-hint').classList.toggle('hidden', !controlsVisible);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key.toLowerCase() === 'h') {
+        toggleControls();
+      }
+    });
+
+    // Double-click to toggle
+    document.addEventListener('dblclick', toggleControls);
+
+    // ========================================================================
+    // Animation Loop
+    // ========================================================================
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const delta = clock.getDelta();
+      
+      if (mixer) mixer.update(delta);
+      if (currentVRM) currentVRM.update(delta);
+      
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // ========================================================================
+    // Window Resize
+    // ========================================================================
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Hide loading after init
+    setTimeout(() => {
+      document.getElementById('loading').classList.add('hidden');
+    }, 1000);
+  </script>
+</body>
+</html>

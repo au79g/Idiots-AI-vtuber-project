@@ -1,0 +1,28 @@
+# AI VTuber Persona System - Requirements
+# Install with: pip install -r requirements.txt
+
+# ─────────────────────────────────────────────────
+# REQUIRED - Core functionality
+# ─────────────────────────────────────────────────
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-huggingface>=0.0.1
+chromadb>=0.4.0
+websockets>=12.0
+playsound==1.2.2
+g2p-en>=2.1.0
+
+# ─────────────────────────────────────────────────
+# OPTIONAL - Voice Input (Whisper)
+# ─────────────────────────────────────────────────
+# Uncomment to enable voice input features
+# Also requires FFmpeg installed on system
+# openai-whisper>=20231117
+# sounddevice>=0.4.6
+# numpy>=1.24.0
+
+# ─────────────────────────────────────────────────
+# OPTIONAL - Kick.com Chat Integration
+# ─────────────────────────────────────────────────
+# Uncomment to enable Kick chat features
+# KickApi>=0.3.0
