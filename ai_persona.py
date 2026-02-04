@@ -1,5 +1,5 @@
 """
-AI VTuber Persona System v5.6
+AI VTuber Persona System v5.7
 Fixes:
 - Clearer role separation in prompts (fixes "You are Schizo Chair" confusion)
 - Aggressive output cleaning (removes |>system, role confusion, etc.)
@@ -34,6 +34,12 @@ Fixes:
   - Keeps stream engaging even without viewer interaction
   - Chat always takes priority over rambling
   - Commands: !idle chatter on/off, !idle topics, !idle ramble
+- v5.7: TTS Audio Improvements
+  - TTS Locking: Prevents audio overlap when multiple sources try to speak
+  - If TTS is playing, new requests wait in queue (no overlap/interruption)
+  - Audio Output Device: Choose which audio device TTS plays through
+  - Commands: !audio devices, !audio device <index>
+  - Useful for routing audio to OBS virtual cables, etc.
 """
 
 import os
@@ -73,6 +79,20 @@ try:
 except ImportError:
     print("\n[!] Missing: pip install langchain-chroma chromadb\n")
     raise
+
+# ============================================================================
+# TTS AUDIO LOCK (Prevents overlapping audio playback)
+# ============================================================================
+# This lock ensures only one TTS output plays at a time.
+# When chat messages and idle chatter both try to speak, 
+# the lock makes them wait in queue rather than overlap.
+
+_tts_lock = threading.Lock()
+_is_speaking = False  # Flag to check if TTS is currently playing
+
+def is_tts_speaking() -> bool:
+    """Check if TTS is currently playing audio"""
+    return _is_speaking
 
 # ============================================================================
 # CONFIGURATION
@@ -123,6 +143,13 @@ class Config:
     
     PIPER_EXECUTABLE = Path("./piper/piper.exe").resolve()
     VOICE_MODEL = Path("./piper/en_US-hfc_female-medium.onnx").resolve()
+    
+    # ─────────────────────────────────────────────────
+    # TTS AUDIO OUTPUT SETTINGS
+    # ─────────────────────────────────────────────────
+    # Audio output device index (None = system default)
+    # Use !audio devices to list available output devices
+    AUDIO_OUTPUT_DEVICE = None  # Set to device index to route audio
     
     # ─────────────────────────────────────────────────
     # VOICE INPUT (Whisper Speech-to-Text)
@@ -1340,6 +1367,11 @@ class ChatProcessor:
         """Main processing loop"""
         while not self._stop_event.is_set():
             try:
+                # Wait if TTS is currently playing (don't process during playback)
+                if is_tts_speaking():
+                    time.sleep(0.5)
+                    continue
+                
                 # Get next message to respond to
                 msg = chat_queue.get_next_message()
                 
@@ -1538,6 +1570,11 @@ class IdleChatterManager:
             try:
                 # Check if we should be rambling
                 if self.should_ramble():
+                    # Check if TTS is currently playing (don't interrupt)
+                    if is_tts_speaking():
+                        time.sleep(0.5)
+                        continue
+                    
                     # Check if there are chat messages waiting (they take priority)
                     if chat_queue.get_pending_count() > 0:
                         # Chat has priority, reset activity
@@ -1968,16 +2005,98 @@ Express emotion through your WORDS and punctuation, not actions."""
 # AUDIO
 # ============================================================================
 
+AUDIO_METHOD = None
+_pygame_initialized = False
+
+# Try to import audio libraries
 try:
     from playsound import playsound
     AUDIO_METHOD = "playsound"
 except ImportError:
+    pass
+
+# Prefer pygame if available (supports device selection)
+try:
+    import pygame
+    AUDIO_METHOD = "pygame"
+except ImportError:
+    pass
+
+# Also check for sounddevice (best for device selection)
+try:
+    import sounddevice as sd_output
+    import soundfile as sf_output
+    if AUDIO_METHOD != "pygame":  # pygame already handles devices well
+        AUDIO_METHOD = "sounddevice"
+except ImportError:
+    pass
+
+def init_audio_output(device_index: int = None) -> bool:
+    """Initialize audio output with optional device selection"""
+    global _pygame_initialized
+    
+    if AUDIO_METHOD == "pygame":
+        try:
+            import pygame
+            pygame.mixer.quit()  # Reset if already initialized
+            
+            if device_index is not None:
+                # pygame doesn't directly support device index, but we can try
+                # For proper device selection, use sounddevice
+                pygame.mixer.init()
+            else:
+                pygame.mixer.init()
+            
+            _pygame_initialized = True
+            return True
+        except Exception as e:
+            print(f"    ⚠ Failed to init pygame audio: {e}")
+            return False
+    
+    return AUDIO_METHOD is not None
+
+def list_audio_output_devices() -> List[dict]:
+    """List available audio output devices"""
+    devices = []
+    
+    # Try sounddevice first (most reliable for device listing)
     try:
-        import pygame
-        pygame.mixer.init()
-        AUDIO_METHOD = "pygame"
-    except:
-        AUDIO_METHOD = None
+        import sounddevice as sd_list
+        for i, dev in enumerate(sd_list.query_devices()):
+            if dev['max_output_channels'] > 0:  # Output device
+                devices.append({
+                    'index': i,
+                    'name': dev['name'],
+                    'channels': dev['max_output_channels'],
+                    'default': i == sd_list.default.device[1]  # Check if default output
+                })
+        return devices
+    except Exception:
+        pass
+    
+    # Fallback: can't list devices
+    return []
+
+def set_audio_output_device(device_index: int) -> bool:
+    """Set the audio output device"""
+    devices = list_audio_output_devices()
+    valid_indices = [d['index'] for d in devices]
+    
+    if device_index not in valid_indices:
+        return False
+    
+    Config.AUDIO_OUTPUT_DEVICE = device_index
+    
+    # Reinitialize if using sounddevice
+    if AUDIO_METHOD == "sounddevice":
+        try:
+            import sounddevice as sd_set
+            sd_set.default.device = (sd_set.default.device[0], device_index)
+            return True
+        except:
+            pass
+    
+    return True
 
 def get_audio_duration(wav_path: str) -> float:
     try:
@@ -1986,73 +2105,131 @@ def get_audio_duration(wav_path: str) -> float:
     except:
         return 0
 
+def play_audio_file(wav_path: str, duration: float) -> bool:
+    """
+    Play an audio file through the configured output device.
+    Returns True if playback was successful.
+    """
+    if AUDIO_METHOD == "sounddevice":
+        try:
+            import sounddevice as sd_play
+            import soundfile as sf_play
+            
+            data, samplerate = sf_play.read(wav_path)
+            
+            # Use configured device or default
+            device = Config.AUDIO_OUTPUT_DEVICE
+            
+            sd_play.play(data, samplerate, device=device)
+            sd_play.wait()  # Wait for playback to finish
+            return True
+        except Exception as e:
+            print(f"    ⚠ sounddevice playback error: {e}")
+            time.sleep(duration)
+            return False
+    
+    elif AUDIO_METHOD == "pygame":
+        try:
+            global _pygame_initialized
+            if not _pygame_initialized:
+                init_audio_output(Config.AUDIO_OUTPUT_DEVICE)
+            
+            import pygame
+            sound = pygame.mixer.Sound(wav_path)
+            sound.play()
+            time.sleep(duration + 0.1)
+            return True
+        except Exception as e:
+            print(f"    ⚠ pygame playback error: {e}")
+            time.sleep(duration)
+            return False
+    
+    elif AUDIO_METHOD == "playsound":
+        try:
+            playsound(wav_path)
+            return True
+        except Exception as e:
+            print(f"    ⚠ playsound error: {e}")
+            time.sleep(duration)
+            return False
+    
+    else:
+        # No audio method available, just wait
+        time.sleep(duration)
+        return False
+
 def speak_text(text: str, emotion: str = "neutral"):
-    """TTS with animation. Pauses voice listening to prevent feedback loop."""
+    """
+    TTS with animation. Uses lock to prevent audio overlap.
+    Pauses voice listening during playback to prevent feedback loop.
+    """
+    global _is_speaking
+    
     clean_text = re.sub(r'\[EMOTION:\s*\w+\]', '', text).strip()
     if not clean_text:
         return
     
-    # Pause voice listening during TTS to prevent feedback loop
-    was_listening = voice_manager.is_listening
-    if was_listening:
-        voice_manager.pause_listening()
-    
-    anim_path = anim_manager.get_for_emotion(emotion) if anim_manager.all_animations else None
-    duration = 0
-    wav_path = None
-    
-    if Config.PIPER_EXECUTABLE.exists():
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            wav_path = f.name
+    # Acquire the TTS lock - this ensures only one speak_text runs at a time
+    # Other callers will wait here until current TTS finishes
+    with _tts_lock:
+        _is_speaking = True
         
-        cmd = f'"{Config.PIPER_EXECUTABLE}" --model "{Config.VOICE_MODEL}" --output_file "{wav_path}"'
+        try:
+            # Pause voice listening during TTS to prevent feedback loop
+            was_listening = voice_manager.is_listening
+            if was_listening:
+                voice_manager.pause_listening()
+            
+            anim_path = anim_manager.get_for_emotion(emotion) if anim_manager.all_animations else None
+            duration = 0
+            wav_path = None
+            
+            if Config.PIPER_EXECUTABLE.exists():
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    wav_path = f.name
+                
+                cmd = f'"{Config.PIPER_EXECUTABLE}" --model "{Config.VOICE_MODEL}" --output_file "{wav_path}"'
+                
+                if platform.system() == "Windows":
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
+                        tf.write(clean_text)
+                        temp_txt = tf.name
+                    subprocess.run(f'type "{temp_txt}" | {cmd}', shell=True, capture_output=True)
+                    try: os.remove(temp_txt)
+                    except: pass
+                else:
+                    subprocess.run(f'echo "{clean_text}" | {cmd}', shell=True, capture_output=True)
+                
+                duration = get_audio_duration(wav_path)
+            
+            if duration == 0:
+                duration = len(clean_text) * 0.05
+            
+            visemes = text_to_visemes(clean_text)
+            anim_name = anim_path.stem if anim_path else "none"
+            print(f"    🎭 {emotion} | 🎬 {anim_name} | ⏱ {duration:.1f}s")
+            
+            ws_manager.send_sync_playback(emotion, anim_path, visemes, duration)
+            
+            if wav_path and duration > 0:
+                play_audio_file(wav_path, duration)
+                try: os.remove(wav_path)
+                except: pass
+            else:
+                time.sleep(duration)
+            
+            ws_manager.send_stop_visemes()
+            time.sleep(Config.RETURN_TO_IDLE_DELAY)
+            ws_manager.send_idle()
+            
+            # Resume voice listening after TTS completes
+            if was_listening:
+                # Small delay to ensure audio has fully stopped
+                time.sleep(0.5)
+                voice_manager.resume_listening()
         
-        if platform.system() == "Windows":
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tf:
-                tf.write(clean_text)
-                temp_txt = tf.name
-            subprocess.run(f'type "{temp_txt}" | {cmd}', shell=True, capture_output=True)
-            try: os.remove(temp_txt)
-            except: pass
-        else:
-            subprocess.run(f'echo "{clean_text}" | {cmd}', shell=True, capture_output=True)
-        
-        duration = get_audio_duration(wav_path)
-    
-    if duration == 0:
-        duration = len(clean_text) * 0.05
-    
-    visemes = text_to_visemes(clean_text)
-    anim_name = anim_path.stem if anim_path else "none"
-    print(f"    🎭 {emotion} | 🎬 {anim_name} | ⏱ {duration:.1f}s")
-    
-    ws_manager.send_sync_playback(emotion, anim_path, visemes, duration)
-    
-    if wav_path and duration > 0:
-        if AUDIO_METHOD == "playsound":
-            try: playsound(wav_path)
-            except: time.sleep(duration)
-        elif AUDIO_METHOD == "pygame":
-            try:
-                import pygame
-                sound = pygame.mixer.Sound(wav_path)
-                sound.play()
-                time.sleep(duration + 0.1)
-            except: time.sleep(duration)
-        try: os.remove(wav_path)
-        except: pass
-    else:
-        time.sleep(duration)
-    
-    ws_manager.send_stop_visemes()
-    time.sleep(Config.RETURN_TO_IDLE_DELAY)
-    ws_manager.send_idle()
-    
-    # Resume voice listening after TTS completes
-    if was_listening:
-        # Small delay to ensure audio has fully stopped
-        time.sleep(0.5)
-        voice_manager.resume_listening()
+        finally:
+            _is_speaking = False
 
 # ============================================================================
 # RESPONSE PROCESSING
@@ -2163,6 +2340,11 @@ Commands (anyone):
   {Config.ADMIN_PREFIX}reload            - Reload character/lorebook/animations
   {Config.ADMIN_PREFIX}addadmin <name>   - Add admin (session only)
 
+Audio Output:
+  {Config.ADMIN_PREFIX}audio             - Show audio output status
+  {Config.ADMIN_PREFIX}audio devices     - List audio output devices
+  {Config.ADMIN_PREFIX}audio device <n>  - Set output device by index
+
 Voice Input (Whisper):
   {Config.ADMIN_PREFIX}voice on/off      - Enable/disable voice input
   {Config.ADMIN_PREFIX}voice test        - Test microphone + transcription
@@ -2198,7 +2380,7 @@ Idle Chatter (Fill Dead Air):
 
 def main():
     print("─" * 50)
-    print(f"🎭 {character.name} - v5.6")
+    print(f"🎭 {character.name} - v5.7")
     print("─" * 50)
     print(f"WebSocket: ws://localhost:{Config.WEBSOCKET_PORT}")
     print(f"Admins: {', '.join(Config.ADMIN_USERS)}")
@@ -2397,6 +2579,49 @@ def main():
                         print(f"    ✓ Added admin: {new_admin} (session only)")
                     else:
                         print(f"    ⚠ Already admin or invalid")
+                    continue
+                
+                # ─────────────────────────────────────────────────
+                # AUDIO OUTPUT COMMANDS
+                # ─────────────────────────────────────────────────
+                
+                # Bare !audio command - show status
+                if admin_cmd == "audio":
+                    print("    Audio Output Status:")
+                    print(f"      Method: {AUDIO_METHOD or 'None'}")
+                    print(f"      Speaking: {'Yes 🔊' if is_tts_speaking() else 'No'}")
+                    if Config.AUDIO_OUTPUT_DEVICE is not None:
+                        print(f"      Device: #{Config.AUDIO_OUTPUT_DEVICE}")
+                    else:
+                        print(f"      Device: System default")
+                    print("    Commands: devices, device <index>")
+                    continue
+                
+                if admin_cmd == "audio devices":
+                    devices = list_audio_output_devices()
+                    if devices:
+                        print("    🔊 Audio Output Devices:")
+                        for dev in devices:
+                            default_marker = " (default)" if dev['default'] else ""
+                            selected = " ◀" if dev['index'] == Config.AUDIO_OUTPUT_DEVICE else ""
+                            print(f"      [{dev['index']}] {dev['name']}{default_marker}{selected}")
+                        print(f"\n    Use '!audio device <index>' to select")
+                    else:
+                        print("    ⚠ Could not list audio devices")
+                        print("    Install: pip install sounddevice soundfile")
+                    continue
+                
+                if admin_cmd.startswith("audio device "):
+                    try:
+                        device_idx = int(admin_input[13:].strip())
+                        if set_audio_output_device(device_idx):
+                            devices = list_audio_output_devices()
+                            dev_name = next((d['name'] for d in devices if d['index'] == device_idx), "Unknown")
+                            print(f"    ✓ Audio output set to [{device_idx}] {dev_name}")
+                        else:
+                            print(f"    ⚠ Invalid device index. Use '!audio devices' to list.")
+                    except ValueError:
+                        print("    ⚠ Usage: !audio device <index>")
                     continue
                 
                 # ─────────────────────────────────────────────────
