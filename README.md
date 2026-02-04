@@ -53,7 +53,7 @@ python ai_persona.py
 
 ```
 ai-vtuber/
-├── ai_persona_v5_5.py      # Main Python script
+├── ai_persona.py      # Main Python script
 ├── streaming_stage.html    # OBS-ready 3D viewer
 ├── start.bat               # Launcher with menu
 ├── run.bat                 # Quick start (AI only)
