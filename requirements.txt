@@ -1,28 +1,33 @@
-# AI VTuber Persona System - Requirements
-# Install with: pip install -r requirements.txt
+# ═══════════════════════════════════════════════════
+# AI VTuber Persona System - Dependencies
+# ═══════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────
-# REQUIRED - Core functionality
-# ─────────────────────────────────────────────────
-langchain>=0.1.0
-langchain-openai>=0.0.5
-langchain-huggingface>=0.0.1
-chromadb>=0.4.0
-websockets>=12.0
+# ── Core (Required) ──────────────────────────────
+langchain
+langchain-openai
+langchain-core
+websockets
+
+# ── Lip Sync / Phonemes (Required for TTS) ──────
+nltk
+g2p-en
+
+# ── Memory / Vector Database (Required) ─────────
+langchain-chroma
+chromadb
+langchain-huggingface
+sentence-transformers
+
+# ── Audio Playback (at least one needed) ─────────
 playsound==1.2.2
-g2p-en>=2.1.0
+pygame
+soundfile
 
-# ─────────────────────────────────────────────────
-# OPTIONAL - Voice Input (Whisper)
-# ─────────────────────────────────────────────────
-# Uncomment to enable voice input features
-# Also requires FFmpeg installed on system
-# openai-whisper>=20231117
-# sounddevice>=0.4.6
-# numpy>=1.24.0
+# ── Voice Input (Optional - Whisper STT) ─────────
+openai-whisper
+sounddevice
+numpy
 
-# ─────────────────────────────────────────────────
-# OPTIONAL - Kick.com Chat Integration
-# ─────────────────────────────────────────────────
-# Uncomment to enable Kick chat features
-# KickApi>=0.3.0
+# ── Kick.com Chat (Optional) ─────────────────────
+# Note: May fail on some systems - that's OK
+# KickApi
