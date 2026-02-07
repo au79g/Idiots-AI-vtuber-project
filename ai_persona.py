@@ -216,6 +216,7 @@ class Config:
     
     WEBSOCKET_PORT = 8765
     ANIMATIONS_DIR = Path("./animations")
+    DEFAULT_IDLE_ANIMATION = "Idle"  # Set your default idle animation name here (no .vrma extension)
     RETURN_TO_IDLE_DELAY = 0.3
     
     # ─────────────────────────────────────────────────
@@ -696,11 +697,26 @@ class AnimationManager:
                 self.animations[category] = []
             self.animations[category].append(file_path)
         
-        # Set default idle
-        if 'idle' in self.animations and self.animations['idle']:
-            self.idle_animation = self.animations['idle'][0]
-        elif self.all_animations:
-            self.idle_animation = self.all_animations[0]
+        # Set default idle animation
+        # First priority: User-configured default (Config.DEFAULT_IDLE_ANIMATION)
+        if Config.DEFAULT_IDLE_ANIMATION:
+            default_anim = self.get_by_name(Config.DEFAULT_IDLE_ANIMATION)
+            if default_anim:
+                self.idle_animation = default_anim
+                print(f"  ✓ Using configured idle: {default_anim.stem}")
+            else:
+                print(f"  ⚠ Configured idle '{Config.DEFAULT_IDLE_ANIMATION}' not found, using fallback")
+                # Fallback to first idle animation
+                if 'idle' in self.animations and self.animations['idle']:
+                    self.idle_animation = self.animations['idle'][0]
+                elif self.all_animations:
+                    self.idle_animation = self.all_animations[0]
+        else:
+            # No default configured, use old behavior
+            if 'idle' in self.animations and self.animations['idle']:
+                self.idle_animation = self.animations['idle'][0]
+            elif self.all_animations:
+                self.idle_animation = self.all_animations[0]
         
         print(f"✓ Animations: {len(self.all_animations)}")
     
