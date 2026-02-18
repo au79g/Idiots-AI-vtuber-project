@@ -2,7 +2,7 @@
 
 An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text-to-speech, and live chat integration.
 
-![Version](https://img.shields.io/badge/version-5.5-blue)
+![Version](https://img.shields.io/badge/version-5.8-blue)
 ![Python](https://img.shields.io/badge/python-3.10+-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -12,9 +12,12 @@ An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text
 - **3D VRM Avatar** - Animated character with facial expressions and emotions
 - **Text-to-Speech** - Natural voice output with lip sync (Piper TTS)
 - **Live Chat Integration** - Connects to Kick.com chat for stream interaction
-- **Voice Input** - Speech-to-text for collaborations (Whisper)
+- **Voice Input** - Speech-to-text for collaborations (Whisper — supports openai-whisper and faster-whisper)
+- **AI-to-AI Peer Link** - Synchronize two AI instances for collaborative conversations (no talking over each other)
+- **Idle Chatter** - Fill dead air automatically using topic prompt files
 - **3-Tier Memory System** - Per-user logs, stream highlights, and vector database for long-term semantic memory
 - **Emotion Detection** - AI responses include emotion tags for avatar expressions
+- **Audio Output Routing** - Choose which audio device TTS plays through (useful for OBS virtual cables)
 - **OBS Ready** - Transparent background stage for easy streaming setup
 
 ---
@@ -58,6 +61,7 @@ python ai_persona.py
 ```
 ai-vtuber/
 ├── ai_persona.py           # Main AI persona script
+├── animation_organizer.py  # Tool to sort/organize VRMA animation files
 ├── vector_db_manager.py    # Vector database import tool
 ├── streaming_stage.html    # OBS-ready 3D viewer
 ├── vrm_viewer_v3.html      # Testing/development viewer
@@ -65,9 +69,13 @@ ai-vtuber/
 ├── start.bat               # Launcher menu
 ├── run.bat                 # Quick start (AI only)
 │
-├── character.json          # SillyTavern character card
-├── lorebook.json           # SillyTavern lorebook
+├── character.json          # SillyTavern character card (active)
+├── character.example.json  # Example character card for reference
+├── lorebook.json           # SillyTavern lorebook (active)
+├── lorebook.example.json   # Example lorebook for reference
 ├── requirements.txt        # Python dependencies
+│
+├── *.vrm                   # VRM model files (place your .vrm models here)
 │
 ├── scripts/
 │   ├── intro.txt           # Stream intro script
@@ -88,7 +96,14 @@ ai-vtuber/
 │   ├── stream_highlights.txt
 │   └── voice_sessions/     # Voice transcripts
 │
+├── memory_db/              # Supplemental memory/database storage
+│
+├── topics/                 # Idle chatter topic prompt files
+│   └── *.txt               # One prompt per line — AI uses these to fill dead air
+│
 ├── vector_db/              # ChromaDB vector storage
+│
+├── venv/                   # Python virtual environment (auto-created by setup)
 │
 └── piper/                  # TTS engine
     ├── piper.exe
@@ -112,10 +127,20 @@ pip install langchain-huggingface sentence-transformers
 ```
 
 ### Voice Input (Optional)
+Choose one Whisper backend:
 ```bash
+# Option A: openai-whisper (CPU/GPU, easier to install)
 pip install openai-whisper sounddevice numpy
+
+# Option B: faster-whisper (GPU optimized, faster)
+pip install faster-whisper sounddevice numpy
 ```
 Also requires [FFmpeg](https://ffmpeg.org/download.html) installed and in PATH.
+
+### Kick.com Chat (Optional)
+```bash
+pip install KickApi
+```
 
 ### Vector Database Manager Tool (Optional but Recommended)
 ```bash
@@ -129,7 +154,7 @@ pip install numpy        # Semantic chunking
 pip install langchain langchain-openai langchain-chroma chromadb
 pip install langchain-huggingface sentence-transformers
 pip install websockets playsound==1.2.2 g2p-en nltk
-pip install openai-whisper sounddevice numpy pymupdf psutil
+pip install openai-whisper sounddevice numpy pymupdf psutil KickApi
 ```
 
 ---
@@ -156,30 +181,14 @@ python vector_db_manager.py
 | **Semantic** | Rulebooks, reference material, structured content | Slower |
 | **Sentence** | Articles, narratives | Medium |
 
-### Chunking Modes Explained
+---
 
-**Fixed Chunking** splits text into equal-sized pieces. Fast but may cut concepts mid-sentence.
+## 🎞️ Animation Organizer
 
-**Semantic Chunking** uses AI embeddings to detect topic changes, keeping complete concepts together. For example, an entire spell description stays in one chunk instead of being split. Best for RPG rulebooks and reference material.
+The **Animation Organizer** (`animation_organizer.py`) is a utility tool for sorting and managing VRMA animation files into the correct emotion subfolders. Run it to batch-organize loose animation files before starting a stream.
 
-**Sentence Chunking** groups sentences together. A middle ground between speed and coherence.
-
-### Example Usage
-```
-Choice: 2
-📁 Opening folder selector...
-Selected: C:\Documents\RPG_Rulebooks
-
-🔧 Chunking Mode:
-   [1] FIXED    - Fast, fixed-size chunks
-   [2] SEMANTIC - Smart topic-aware chunks (slower)
-   [3] SENTENCE - Sentence-based chunks
-
-Choice: 2
-
-📂 Processing 15 files with SEMANTIC chunking...
-📄 Reading files: |████████████████████| 15/15 (100%) [0.5/s] ETA: 0s
-🔢 Embedding:     |██████████░░░░░░░░░░| 500/1000 (50%) [12.3/s] ETA: 41s
+```bash
+python animation_organizer.py
 ```
 
 ---
@@ -204,7 +213,44 @@ KICK_CHANNEL = "your_kick_username"
 
 ### Voice Input (Optional)
 ```python
-WHISPER_MODEL_SIZE = "base"  # tiny, base, small, medium, large
+WHISPER_MODEL_SIZE = "base"  # tiny, base, small, medium, large-v2, large-v3
+WHISPER_DEVICE = "cuda"       # "cuda" or "cpu"
+WHISPER_COMPUTE_TYPE = "float16"  # "float16" for GPU, "int8" for CPU
+```
+
+### Whisper Transcription Buffering
+```python
+# Combines split transcription fragments before sending to LLM
+VOICE_BUFFER_ENABLED = True
+VOICE_BUFFER_TIMEOUT = 2.0   # Seconds of silence before combining & sending
+```
+
+### Audio Output Routing
+```python
+# Route TTS audio to a specific output device (e.g. OBS virtual cable)
+# Use !audio devices to list available devices, then set the index
+AUDIO_OUTPUT_DEVICE = None   # Set to device index number
+```
+
+### Idle Chatter
+```python
+IDLE_CHATTER_ENABLED = False     # Enable with !idle chatter on
+IDLE_TIMEOUT_SECONDS = 45.0      # Seconds of silence before rambling starts
+IDLE_RAMBLE_INTERVAL = 5.0       # Minimum seconds between rambles
+IDLE_MAX_RAMBLES_PER_TOPIC = 3   # Max rambles per topic before switching
+IDLE_CHATTER_TOKENS = 200        # Token limit for idle chatter responses
+IDLE_TOPICS_DIR = Path("./topics")
+```
+
+### AI-to-AI Peer Link
+```python
+PEER_LINK_ENABLED = False       # Enable with !peer on host / !peer on client
+PEER_LINK_PORT = 9876
+PEER_LINK_MODE = "host"         # "host" or "client"
+PEER_LINK_HOST = "127.0.0.1"   # IP of the host machine
+PEER_LINK_NAME = "AI_1"         # Friendly name for this instance
+PEER_LINK_WAIT_TIMEOUT = 30.0
+PEER_LINK_TURN_DELAY = 1.0      # Natural pause after peer finishes speaking
 ```
 
 ### Memory Settings
@@ -237,14 +283,21 @@ MAX_LORE_ENTRIES = 2          # Lorebook entries to include
 | `!emotion <e>` | Test emotion |
 | `!anim <name>` | Play animation |
 | `!anim list` | List all animations |
-| `!reload` | Reload character/lorebook |
+| `!reload` | Reload character/lorebook/animations |
+| `!addadmin <name>` | Add admin for this session |
 
-### Voice Commands
+### Audio Output Commands
+| Command | Description |
+|---------|-------------|
+| `!audio devices` | List available audio output devices |
+| `!audio device <index>` | Route TTS to a specific device |
+
+### Voice Input Commands
 | Command | Description |
 |---------|-------------|
 | `!voice on/off` | Enable/disable voice input |
 | `!voice test` | Test microphone |
-| `!voice devices` | List audio devices |
+| `!voice devices` | List audio input devices |
 | `!voice ptt` | Push-to-talk (record once) |
 | `!voice listen` | Continuous listening (VAD) |
 | `!voice stop` | Stop listening |
@@ -254,16 +307,84 @@ MAX_LORE_ENTRIES = 2          # Lorebook entries to include
 |---------|-------------|
 | `!kick` | Show connection status |
 | `!kick connect` | Connect to your channel |
-| `!kick process` | Start auto-responding |
-| `!kick stop` | Stop auto-responding |
+| `!kick connect <channel>` | Connect to a specific channel |
+| `!kick disconnect` | Disconnect from Kick |
+| `!kick poll` | Start polling chat (no auto-respond) |
+| `!kick process` | Start polling + auto-responding |
+| `!kick stop` | Stop polling and processing |
 | `!kick next` | Process one message manually |
+| `!kick clear` | Clear the message queue |
+
+### Idle Chatter Commands
+| Command | Description |
+|---------|-------------|
+| `!idle chatter` | Show idle chatter status |
+| `!idle chatter on/off` | Enable/disable idle chatter |
+| `!idle topics` | List topic files and prompt counts |
+| `!idle timeout <seconds>` | Set silence timeout before rambling |
+| `!idle ramble` | Force a single ramble immediately (testing) |
+
+### AI-to-AI Peer Link Commands
+| Command | Description |
+|---------|-------------|
+| `!peer` | Show peer link status |
+| `!peer on host` | Start as host (listens for peer connection) |
+| `!peer on client [ip]` | Connect to a host AI instance |
+| `!peer off` | Disconnect peer link |
+| `!peer name <name>` | Set this instance's display name |
+
+---
+
+## 💭 Idle Chatter Setup
+
+The idle chatter system keeps your stream engaging when chat is quiet. The AI picks random prompts from `.txt` files in the `topics/` folder and generates unprompted conversation.
+
+### Creating Topic Files
+Create any `.txt` file in the `topics/` folder with one prompt per line:
+```
+# topics/games.txt
+Talk about your favorite video game genre
+Share your opinion on a recent game release
+Ask viewers what games they're playing lately
+```
+
+```
+# topics/random.txt
+Say something philosophical about existence
+Share a fun fact about something you find interesting
+Talk about what you'd do if you had a free day
+```
+
+Lines beginning with `#` are treated as comments and ignored. Then enable it during a stream:
+```
+!stream on
+!idle chatter on
+```
+
+---
+
+## 🤝 AI-to-AI Peer Link Setup
+
+The Peer Link allows two AI VTuber instances on the same local network to take turns speaking without talking over each other — useful for AI collab streams.
+
+**Instance 1 (host machine):**
+```
+!peer on host
+```
+
+**Instance 2 (client machine):**
+```
+!peer on client 192.168.1.100
+```
+
+Each instance broadcasts its state (idle / listening / processing / speaking) to the other. When one is speaking, the other waits before responding.
 
 ---
 
 ## 🎭 Character Customization
 
 ### Using SillyTavern Cards
-Place your character card as `character.json`:
+Place your character card as `character.json` (see `character.example.json` for structure):
 ```json
 {
   "name": "Your Character",
@@ -275,14 +396,10 @@ Place your character card as `character.json`:
 ```
 
 ### Using a Lorebook
-Place your lorebook as `lorebook.json` for world-building and lore entries that activate based on keywords.
+Place your lorebook as `lorebook.json` (see `lorebook.example.json` for structure). Lore entries activate based on keywords in the conversation.
 
 ### Using Vector Memory
-Import reference documents with `vector_db_manager.py` for the AI to search during conversations. Great for:
-- RPG rulebooks
-- World lore documents
-- Character backstories
-- Game mechanics references
+Import reference documents with `vector_db_manager.py` for the AI to search during conversations. Great for RPG rulebooks, world lore, character backstories, and game mechanics references.
 
 ---
 
@@ -292,14 +409,14 @@ Import reference documents with `vector_db_manager.py` for the AI to search duri
 2. Set URL to: `file:///C:/path/to/ai-vtuber/streaming_stage.html`
 3. Set dimensions: 1920x1080 (or your stream resolution)
 4. Enable: "Shutdown source when not visible"
-5. The background is transparent - layer your game/content behind it
+5. The background is transparent — layer your game/content behind it
 
 ### Hotkeys
 - Press `H` in the stage to hide/show UI elements
 
 ---
 
-## 🔊 TTS Setup (Piper)
+## 📊 TTS Setup (Piper)
 
 1. Download [Piper](https://github.com/rhasspy/piper/releases)
 2. Extract `piper.exe` to the `piper/` folder
@@ -307,17 +424,23 @@ Import reference documents with `vector_db_manager.py` for the AI to search duri
 4. Place the `.onnx` and `.onnx.json` files in `piper/`
 5. Update `Config.VOICE_MODEL` path if needed
 
+To route TTS to a specific audio device (e.g., an OBS virtual audio cable), use `!audio devices` to find the device index and set `AUDIO_OUTPUT_DEVICE` in Config or use `!audio device <index>` at runtime.
+
 ---
 
 ## 🎤 Voice Input Setup (Whisper)
 
 ```bash
+# openai-whisper (easier, CPU/GPU)
 pip install openai-whisper sounddevice numpy
+
+# OR faster-whisper (GPU optimized)
+pip install faster-whisper sounddevice numpy
 ```
 
 Also requires [FFmpeg](https://ffmpeg.org/download.html) installed and in PATH.
 
-Test with `!voice test` after starting the AI.
+The system auto-detects which backend is installed. Test with `!voice test` after starting the AI.
 
 ---
 
@@ -336,7 +459,7 @@ For embedding (vector database), LM Studio can also load embedding models, or us
 
 ## 🎬 Animations
 
-Place VRMA animation files in the appropriate emotion folders:
+Place VRMA animation files in the appropriate emotion folders, or use `animation_organizer.py` to batch-sort them:
 
 | Folder | Emotions/Triggers |
 |--------|-------------------|
@@ -363,6 +486,7 @@ The AI automatically selects animations based on detected emotion in responses.
 - Check Piper is installed in `piper/` folder
 - Verify the voice model `.onnx` file exists
 - Try `pip install playsound==1.2.2` (specific version required)
+- Use `!audio devices` to check which device TTS is routing to
 
 ### "WebSocket not connecting"
 - Make sure the Python script is running
@@ -372,17 +496,23 @@ The AI automatically selects animations based on detected emotion in responses.
 ### "Voice input not working"
 - Run `!voice test` to check microphone
 - Use `!voice devices` to list available microphones
-- Install FFmpeg if using openai-whisper
+- Install FFmpeg if using openai-whisper or faster-whisper
+- If using faster-whisper on CPU, set `WHISPER_COMPUTE_TYPE = "int8"`
+
+### "Idle chatter won't start"
+- Make sure `!stream on` is active before enabling idle chatter
+- Verify `.txt` files exist in the `topics/` folder
+- Use `!idle topics` to confirm topic files are being detected
+
+### "Peer Link not connecting"
+- Ensure host is started first with `!peer on host`
+- Check that both machines are on the same network
+- Verify port 9876 is not blocked by firewall
+- The client should specify the host's local IP: `!peer on client 192.168.x.x`
 
 ### "Vector database import is slow"
 - This is normal for large documents, especially with semantic chunking
 - Use Fixed chunking mode for faster imports
-- The progress bar shows ETA - let it run
-- Check memory usage with psutil installed
-
-### "Import seems stuck"
-- Check the progress bar - if it's updating, it's working
-- Large PDFs can take several minutes
 - Press Ctrl+C to cancel gracefully (partial progress is saved)
 
 ---
@@ -405,7 +535,11 @@ The vector database (Tier 3) allows the AI to search through imported documents 
 
 | Version | Date | Changes |
 |---------|------|---------|
+| v5.8 | Feb 2025 | AI-to-AI Peer Link, Whisper buffering, TTS audio locking, audio output device routing |
+| v5.7 | Feb 2025 | TTS audio improvements |
+| v5.6 | Feb 2025 | Idle chatter system, topics folder, fill dead air |
 | v5.5 | Feb 2025 | Kick.com integration, voice input, vector DB manager |
+| v5.3 | Feb 2025 | TTS-friendly output cleaning, admin authentication system |
 | v5.2 | Feb 2025 | Clearer prompts, admin commands, animation fixes |
 | v5.1 | Feb 2025 | Output cleaning, username handling, viseme stop |
 | v5.0 | Feb 2025 | Dynamic tokens, chat queue, streaming stage |
@@ -428,8 +562,10 @@ MIT License - Feel free to use, modify, and distribute.
 - [Three.js](https://threejs.org/) - 3D rendering
 - [Piper](https://github.com/rhasspy/piper) - Text-to-speech
 - [Whisper](https://github.com/openai/whisper) - Speech-to-text
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) - GPU-optimized speech-to-text
 - [ChromaDB](https://www.trychroma.com/) - Vector database
 - [LangChain](https://langchain.com/) - LLM framework
+- [KickApi](https://pypi.org/project/KickApi/) - Kick.com chat integration
 
 ---
 
