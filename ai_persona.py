@@ -1,5 +1,5 @@
 """
-AI VTuber Persona System v5.7
+AI VTuber Persona System v5.8
 Fixes:
 - Clearer role separation in prompts (fixes "You are Schizo Chair" confusion)
 - Aggressive output cleaning (removes |>system, role confusion, etc.)
@@ -35,6 +35,11 @@ Fixes:
   - Chat always takes priority over rambling
   - Commands: !idle chatter on/off, !idle topics, !idle ramble
 - v5.7: TTS Audio Improvements
+- v5.8: AI-to-AI Synchronization & Whisper Buffering
+  - Peer Link: TCP-based turn-taking between two AI instances
+  - Whisper transcription buffering (combines split fragments into one input)
+  - Peer state broadcasting (idle/listening/processing/speaking)
+  - Prevents AIs from talking over each other on local network
   - TTS Locking: Prevents audio overlap when multiple sources try to speak
   - If TTS is playing, new requests wait in queue (no overlap/interruption)
   - Audio Output Device: Choose which audio device TTS plays through
@@ -195,6 +200,38 @@ class Config:
     VOICE_SESSIONS_DIR = Path("./memories/voice_sessions")
     
     # ─────────────────────────────────────────────────
+    # WHISPER TRANSCRIPTION BUFFERING
+    # ─────────────────────────────────────────────────
+    # When receiving audio from another AI (or a long speaker), Whisper may
+    # split a single utterance into multiple transcriptions. This buffer
+    # collects them and combines into one input before responding.
+    
+    VOICE_BUFFER_ENABLED = True   # Enable transcription buffering
+    VOICE_BUFFER_TIMEOUT = 2.0    # Seconds of silence before combining & sending
+    # Increase this if the other AI's responses are getting split a lot
+    # Decrease if you want faster response times
+    
+    # ─────────────────────────────────────────────────
+    # PEER LINK (AI-to-AI Synchronization)
+    # ─────────────────────────────────────────────────
+    # Allows two AI instances on the same network to coordinate turn-taking.
+    # One instance runs as HOST, the other as CLIENT.
+    # They exchange state (idle/listening/processing/speaking) so neither
+    # talks over the other.
+    
+    PEER_LINK_ENABLED = False     # Enable with !peer on
+    PEER_LINK_PORT = 9876         # TCP port for peer communication
+    PEER_LINK_MODE = "host"       # "host" or "client"
+    PEER_LINK_HOST = "127.0.0.1"  # IP of the host (client uses this to connect)
+    PEER_LINK_NAME = "AI_1"       # Friendly name for this instance
+    
+    # How long to wait for peer to finish before giving up (seconds)
+    PEER_LINK_WAIT_TIMEOUT = 30.0
+    # Extra delay after peer finishes speaking before we respond (seconds)
+    # This creates a natural conversational pause
+    PEER_LINK_TURN_DELAY = 1.0
+    
+    # ─────────────────────────────────────────────────
     # KICK.COM CHAT INTEGRATION
     # ─────────────────────────────────────────────────
     # Connects to Kick.com chat for live stream integration
@@ -216,7 +253,6 @@ class Config:
     
     WEBSOCKET_PORT = 8765
     ANIMATIONS_DIR = Path("./animations")
-    DEFAULT_IDLE_ANIMATION = "Idle"  # Set your default idle animation name here (no .vrma extension)
     RETURN_TO_IDLE_DELAY = 0.3
     
     # ─────────────────────────────────────────────────
@@ -697,26 +733,11 @@ class AnimationManager:
                 self.animations[category] = []
             self.animations[category].append(file_path)
         
-        # Set default idle animation
-        # First priority: User-configured default (Config.DEFAULT_IDLE_ANIMATION)
-        if Config.DEFAULT_IDLE_ANIMATION:
-            default_anim = self.get_by_name(Config.DEFAULT_IDLE_ANIMATION)
-            if default_anim:
-                self.idle_animation = default_anim
-                print(f"  ✓ Using configured idle: {default_anim.stem}")
-            else:
-                print(f"  ⚠ Configured idle '{Config.DEFAULT_IDLE_ANIMATION}' not found, using fallback")
-                # Fallback to first idle animation
-                if 'idle' in self.animations and self.animations['idle']:
-                    self.idle_animation = self.animations['idle'][0]
-                elif self.all_animations:
-                    self.idle_animation = self.all_animations[0]
-        else:
-            # No default configured, use old behavior
-            if 'idle' in self.animations and self.animations['idle']:
-                self.idle_animation = self.animations['idle'][0]
-            elif self.all_animations:
-                self.idle_animation = self.all_animations[0]
+        # Set default idle
+        if 'idle' in self.animations and self.animations['idle']:
+            self.idle_animation = self.animations['idle'][0]
+        elif self.all_animations:
+            self.idle_animation = self.all_animations[0]
         
         print(f"✓ Animations: {len(self.all_animations)}")
     
@@ -824,6 +845,11 @@ class VoiceInputManager:
         
         # Session logging
         self.session_file = None
+        
+        # Transcription buffer (combines split transcriptions into one)
+        self._transcription_buffer = []
+        self._buffer_lock = threading.Lock()
+        self._buffer_timer = None
         
     def _check_dependencies(self) -> tuple:
         """Check what's available and return status messages"""
@@ -1132,11 +1158,71 @@ class VoiceInputManager:
         self.is_listening = False
     
     def _process_vad_audio(self, audio: np.ndarray):
-        """Process audio detected by VAD"""
+        """Process audio detected by VAD - buffers transcriptions before sending"""
         text = self.transcribe(audio)
         if text and self._callback:
             self._log_transcription(text)
-            self._callback(text)
+            
+            if Config.VOICE_BUFFER_ENABLED:
+                # Add to buffer and reset the flush timer
+                self._buffer_transcription(text)
+            else:
+                # No buffering - send immediately (original behavior)
+                self._callback(text)
+    
+    def _buffer_transcription(self, text: str):
+        """
+        Add transcription to buffer and reset the flush timer.
+        
+        When Whisper splits a single utterance into multiple transcriptions
+        (common when receiving TTS audio from another AI), this collects
+        all fragments and combines them into one input after a quiet period.
+        """
+        with self._buffer_lock:
+            self._transcription_buffer.append(text)
+            print(f"    📝 Buffered: '{text}' ({len(self._transcription_buffer)} fragment{'s' if len(self._transcription_buffer) > 1 else ''})")
+            
+            # Cancel existing timer
+            if self._buffer_timer is not None:
+                self._buffer_timer.cancel()
+            
+            # Start new timer - when it fires, flush the buffer
+            self._buffer_timer = threading.Timer(
+                Config.VOICE_BUFFER_TIMEOUT,
+                self._flush_buffer
+            )
+            self._buffer_timer.daemon = True
+            self._buffer_timer.start()
+    
+    def _flush_buffer(self):
+        """
+        Flush the transcription buffer - combines all fragments and sends
+        as a single input to the callback.
+        """
+        with self._buffer_lock:
+            if not self._transcription_buffer:
+                return
+            
+            # Combine all buffered transcriptions
+            combined = " ".join(self._transcription_buffer)
+            fragment_count = len(self._transcription_buffer)
+            self._transcription_buffer.clear()
+            self._buffer_timer = None
+        
+        if fragment_count > 1:
+            print(f"    📦 Combined {fragment_count} fragments: '{combined}'")
+        
+        # Send the combined text to the callback
+        if self._callback and combined.strip():
+            self._callback(combined.strip())
+    
+    def clear_buffer(self):
+        """Clear the transcription buffer without sending"""
+        with self._buffer_lock:
+            self._transcription_buffer.clear()
+            if self._buffer_timer is not None:
+                self._buffer_timer.cancel()
+                self._buffer_timer = None
     
     def test(self) -> bool:
         """Test voice input with a short recording"""
@@ -1163,6 +1249,359 @@ class VoiceInputManager:
 
 # Create global voice manager instance
 voice_manager = VoiceInputManager()
+
+# ============================================================================
+# PEER LINK MANAGER (AI-to-AI Synchronization)
+# ============================================================================
+# Allows two AI instances to coordinate turn-taking over a local network.
+# Uses a simple TCP connection where both sides broadcast their state.
+#
+# States:
+#   IDLE       - Not doing anything, ready to listen/respond
+#   LISTENING  - Whisper is actively capturing audio
+#   PROCESSING - LLM is generating a response
+#   SPEAKING   - TTS is playing audio output
+#
+# Usage:
+#   Instance 1 (host):  !peer on host
+#   Instance 2 (client): !peer on client <host_ip>
+#
+# When one AI is SPEAKING or PROCESSING, the other will buffer its
+# voice input and wait until the peer returns to IDLE before responding.
+
+import socket
+
+class PeerLinkManager:
+    """
+    Manages AI-to-AI synchronization for turn-taking coordination.
+    
+    Two instances connect via TCP and exchange state updates.
+    This prevents them from talking over each other.
+    """
+    
+    # Possible states
+    STATE_IDLE = "idle"
+    STATE_LISTENING = "listening"
+    STATE_PROCESSING = "processing"
+    STATE_SPEAKING = "speaking"
+    
+    def __init__(self):
+        self.is_enabled = False
+        self.is_connected = False
+        self.mode = None  # "host" or "client"
+        self.name = Config.PEER_LINK_NAME
+        
+        # Connection
+        self._server_socket = None
+        self._peer_socket = None
+        self._recv_thread = None
+        self._accept_thread = None
+        self._stop_event = threading.Event()
+        
+        # State tracking
+        self._my_state = self.STATE_IDLE
+        self._peer_state = self.STATE_IDLE
+        self._peer_name = "Unknown"
+        self._state_lock = threading.Lock()
+        
+        # Turn coordination
+        self._peer_idle_event = threading.Event()
+        self._peer_idle_event.set()  # Assume peer is idle initially
+        
+        # Callbacks for state change notifications
+        self._on_peer_state_change = None
+    
+    @property
+    def my_state(self):
+        return self._my_state
+    
+    @property
+    def peer_state(self):
+        return self._peer_state
+    
+    @property
+    def peer_name(self):
+        return self._peer_name
+    
+    def is_peer_busy(self) -> bool:
+        """Check if peer is currently speaking or processing"""
+        if not self.is_enabled or not self.is_connected:
+            return False
+        return self._peer_state in (self.STATE_SPEAKING, self.STATE_PROCESSING)
+    
+    def wait_for_peer_idle(self, timeout: float = None) -> bool:
+        """
+        Block until peer is idle. Returns True if peer became idle,
+        False if timeout was reached.
+        """
+        if not self.is_enabled or not self.is_connected:
+            return True
+        
+        if not self.is_peer_busy():
+            return True
+        
+        timeout = timeout or Config.PEER_LINK_WAIT_TIMEOUT
+        print(f"    ⏳ Waiting for {self._peer_name} to finish ({self._peer_state})...")
+        result = self._peer_idle_event.wait(timeout=timeout)
+        
+        if result:
+            # Add natural pause after peer finishes
+            time.sleep(Config.PEER_LINK_TURN_DELAY)
+        else:
+            print(f"    ⚠ Timed out waiting for {self._peer_name}")
+        
+        return result
+    
+    def set_state(self, state: str):
+        """Update our state and broadcast to peer"""
+        with self._state_lock:
+            if state == self._my_state:
+                return
+            self._my_state = state
+        
+        self._send_state_update()
+    
+    def start_host(self, port: int = None) -> bool:
+        """Start as host (listens for incoming connection)"""
+        port = port or Config.PEER_LINK_PORT
+        
+        try:
+            self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server_socket.settimeout(1.0)
+            self._server_socket.bind(('0.0.0.0', port))
+            self._server_socket.listen(1)
+            
+            self.mode = "host"
+            self.is_enabled = True
+            self._stop_event.clear()
+            
+            # Start accept thread
+            self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+            self._accept_thread.start()
+            
+            print(f"    ✓ Peer Link: Hosting on port {port}")
+            print(f"    ⏳ Waiting for peer to connect...")
+            return True
+            
+        except Exception as e:
+            print(f"    ❌ Peer Link host failed: {e}")
+            return False
+    
+    def start_client(self, host: str = None, port: int = None) -> bool:
+        """Start as client (connects to host)"""
+        host = host or Config.PEER_LINK_HOST
+        port = port or Config.PEER_LINK_PORT
+        
+        try:
+            self._peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._peer_socket.settimeout(5.0)
+            self._peer_socket.connect((host, port))
+            self._peer_socket.settimeout(None)
+            
+            self.mode = "client"
+            self.is_enabled = True
+            self.is_connected = True
+            self._stop_event.clear()
+            
+            # Start receive thread
+            self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+            self._recv_thread.start()
+            
+            # Send hello
+            self._send_message({"type": "hello", "name": self.name, "state": self._my_state})
+            
+            print(f"    ✓ Peer Link: Connected to {host}:{port}")
+            return True
+            
+        except Exception as e:
+            print(f"    ❌ Peer Link connection failed: {e}")
+            print(f"      Make sure the other AI has !peer on host running")
+            return False
+    
+    def stop(self):
+        """Disconnect and stop peer link"""
+        self._stop_event.set()
+        self.is_enabled = False
+        self.is_connected = False
+        
+        # Send goodbye
+        try:
+            self._send_message({"type": "goodbye", "name": self.name})
+        except:
+            pass
+        
+        # Close sockets
+        for sock in [self._peer_socket, self._server_socket]:
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+        
+        self._peer_socket = None
+        self._server_socket = None
+        self._peer_state = self.STATE_IDLE
+        self._peer_idle_event.set()
+        
+        print("    🔌 Peer Link: Disconnected")
+    
+    def get_status(self) -> dict:
+        """Get current peer link status"""
+        return {
+            'enabled': self.is_enabled,
+            'connected': self.is_connected,
+            'mode': self.mode,
+            'my_name': self.name,
+            'my_state': self._my_state,
+            'peer_name': self._peer_name,
+            'peer_state': self._peer_state,
+        }
+    
+    # ─── Internal Methods ────────────────────────────
+    
+    def _accept_loop(self):
+        """Host: wait for client connection"""
+        while not self._stop_event.is_set():
+            try:
+                conn, addr = self._server_socket.accept()
+                self._peer_socket = conn
+                self.is_connected = True
+                
+                print(f"\n    ✓ Peer connected from {addr[0]}:{addr[1]}")
+                
+                # Send hello
+                self._send_message({"type": "hello", "name": self.name, "state": self._my_state})
+                
+                # Start receive thread
+                self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+                self._recv_thread.start()
+                
+                return  # Only accept one peer
+                
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    print(f"    ❌ Accept error: {e}")
+                return
+    
+    def _recv_loop(self):
+        """Receive messages from peer"""
+        buffer = ""
+        
+        while not self._stop_event.is_set():
+            try:
+                if not self._peer_socket:
+                    break
+                
+                self._peer_socket.settimeout(1.0)
+                
+                try:
+                    data = self._peer_socket.recv(4096)
+                except socket.timeout:
+                    continue
+                
+                if not data:
+                    # Peer disconnected
+                    print(f"\n    ⚠ Peer {self._peer_name} disconnected")
+                    self.is_connected = False
+                    self._peer_state = self.STATE_IDLE
+                    self._peer_idle_event.set()
+                    break
+                
+                buffer += data.decode('utf-8')
+                
+                # Process complete messages (newline-delimited JSON)
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    line = line.strip()
+                    if line:
+                        try:
+                            msg = json.loads(line)
+                            self._handle_message(msg)
+                        except json.JSONDecodeError:
+                            pass
+                            
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    print(f"    ❌ Peer recv error: {e}")
+                break
+        
+        self.is_connected = False
+    
+    def _handle_message(self, msg: dict):
+        """Handle incoming peer message"""
+        msg_type = msg.get("type", "")
+        
+        if msg_type == "hello":
+            self._peer_name = msg.get("name", "Unknown")
+            peer_state = msg.get("state", self.STATE_IDLE)
+            self._update_peer_state(peer_state)
+            print(f"    🤝 Peer Link: {self._peer_name} connected (state: {peer_state})")
+            
+        elif msg_type == "state":
+            new_state = msg.get("state", self.STATE_IDLE)
+            self._update_peer_state(new_state)
+            
+        elif msg_type == "goodbye":
+            print(f"\n    👋 {self._peer_name} disconnected")
+            self.is_connected = False
+            self._peer_state = self.STATE_IDLE
+            self._peer_idle_event.set()
+    
+    def _update_peer_state(self, new_state: str):
+        """Update tracked peer state and manage coordination events"""
+        old_state = self._peer_state
+        self._peer_state = new_state
+        
+        if new_state == self.STATE_IDLE:
+            self._peer_idle_event.set()
+        else:
+            self._peer_idle_event.clear()
+        
+        # Log state transitions (only meaningful ones)
+        if old_state != new_state:
+            state_icons = {
+                self.STATE_IDLE: "💤",
+                self.STATE_LISTENING: "👂",
+                self.STATE_PROCESSING: "🤔",
+                self.STATE_SPEAKING: "🔊",
+            }
+            icon = state_icons.get(new_state, "❓")
+            # Only print speaking/idle transitions to avoid spam
+            if new_state in (self.STATE_SPEAKING, self.STATE_IDLE) and old_state != new_state:
+                status = f"{icon} {self._peer_name}: {new_state}"
+                print(f"    [Peer] {status}")
+        
+        # Notify callback if set
+        if self._on_peer_state_change:
+            try:
+                self._on_peer_state_change(old_state, new_state)
+            except:
+                pass
+    
+    def _send_message(self, msg: dict):
+        """Send a message to the peer"""
+        if not self._peer_socket or not self.is_connected:
+            return
+        
+        try:
+            data = json.dumps(msg) + '\n'
+            self._peer_socket.sendall(data.encode('utf-8'))
+        except Exception:
+            pass  # Don't crash on send failures
+    
+    def _send_state_update(self):
+        """Broadcast current state to peer"""
+        self._send_message({
+            "type": "state",
+            "name": self.name,
+            "state": self._my_state
+        })
+
+# Create global peer link manager
+peer_link = PeerLinkManager()
 
 # ============================================================================
 # KICK.COM CHAT MANAGER
@@ -1388,12 +1827,23 @@ class ChatProcessor:
                     time.sleep(0.5)
                     continue
                 
+                # Wait if peer is speaking/processing (don't talk over them)
+                if peer_link.is_peer_busy():
+                    time.sleep(0.5)
+                    continue
+                
                 # Get next message to respond to
                 msg = chat_queue.get_next_message()
                 
                 if msg:
                     # Reset idle chatter (chat takes priority)
                     idle_chatter.reset_activity()
+                    
+                    # Wait for peer to be idle before responding
+                    peer_link.wait_for_peer_idle()
+                    
+                    # Broadcast processing state
+                    peer_link.set_state(PeerLinkManager.STATE_PROCESSING)
                     
                     # Process the message
                     print(f"\n    📨 Processing: {msg.username}: {msg.content[:40]}...")
@@ -1405,6 +1855,8 @@ class ChatProcessor:
                         display_text = clean_response(response)
                         print(f"\n{character.name}: {display_text}")
                         speak_text(response, extract_emotion(response))
+                    else:
+                        peer_link.set_state(PeerLinkManager.STATE_IDLE)
                     
                     # Reset activity again after responding
                     idle_chatter.reset_activity()
@@ -1414,6 +1866,7 @@ class ChatProcessor:
                 
             except Exception as e:
                 print(f"    ❌ Chat processor error: {e}")
+                peer_link.set_state(PeerLinkManager.STATE_IDLE)
                 time.sleep(1)
 
 # Create global chat processor instance
@@ -1588,6 +2041,11 @@ class IdleChatterManager:
                 if self.should_ramble():
                     # Check if TTS is currently playing (don't interrupt)
                     if is_tts_speaking():
+                        time.sleep(0.5)
+                        continue
+                    
+                    # Check if peer is busy (don't talk over them)
+                    if peer_link.is_peer_busy():
                         time.sleep(0.5)
                         continue
                     
@@ -2178,6 +2636,7 @@ def speak_text(text: str, emotion: str = "neutral"):
     """
     TTS with animation. Uses lock to prevent audio overlap.
     Pauses voice listening during playback to prevent feedback loop.
+    Broadcasts state to peer link if enabled.
     """
     global _is_speaking
     
@@ -2189,6 +2648,9 @@ def speak_text(text: str, emotion: str = "neutral"):
     # Other callers will wait here until current TTS finishes
     with _tts_lock:
         _is_speaking = True
+        
+        # Broadcast SPEAKING state to peer
+        peer_link.set_state(PeerLinkManager.STATE_SPEAKING)
         
         try:
             # Pause voice listening during TTS to prevent feedback loop
@@ -2246,6 +2708,8 @@ def speak_text(text: str, emotion: str = "neutral"):
         
         finally:
             _is_speaking = False
+            # Broadcast IDLE state to peer
+            peer_link.set_state(PeerLinkManager.STATE_IDLE)
 
 # ============================================================================
 # RESPONSE PROCESSING
@@ -2371,6 +2835,13 @@ Voice Input (Whisper):
   {Config.ADMIN_PREFIX}voice listen      - Start VAD continuous listening
   {Config.ADMIN_PREFIX}voice stop        - Stop listening
 
+Peer Link (AI-to-AI Sync):
+  {Config.ADMIN_PREFIX}peer              - Show peer link status
+  {Config.ADMIN_PREFIX}peer on host      - Start as host (wait for peer)
+  {Config.ADMIN_PREFIX}peer on client [ip] - Connect to host
+  {Config.ADMIN_PREFIX}peer off          - Disconnect from peer
+  {Config.ADMIN_PREFIX}peer name <n>  - Set this instance's name
+
 Kick.com Chat:
   {Config.ADMIN_PREFIX}kick              - Show Kick status
   {Config.ADMIN_PREFIX}kick connect      - Connect to your Kick channel
@@ -2396,7 +2867,7 @@ Idle Chatter (Fill Dead Air):
 
 def main():
     print("─" * 50)
-    print(f"🎭 {character.name} - v5.7")
+    print(f"🎭 {character.name} - v5.8")
     print("─" * 50)
     print(f"WebSocket: ws://localhost:{Config.WEBSOCKET_PORT}")
     print(f"Admins: {', '.join(Config.ADMIN_USERS)}")
@@ -2425,6 +2896,11 @@ def main():
         print(f"Idle Chatter: {topic_count} topic files (use !idle chatter on)")
     else:
         print(f"Idle Chatter: No topics in {Config.IDLE_TOPICS_DIR}/ (create .txt files)")
+    
+    # Peer link status
+    print(f"Peer Link: Available (use !peer on host or !peer on client)")
+    if Config.VOICE_BUFFER_ENABLED:
+        print(f"Voice Buffer: Enabled ({Config.VOICE_BUFFER_TIMEOUT}s timeout)")
     
     print("Type 'help' for commands")
     print("─" * 50)
@@ -2476,6 +2952,9 @@ def main():
             # ─────────────────────────────────────────────────
             
             if cmd == "exit":
+                # Cleanup
+                if peer_link.is_enabled:
+                    peer_link.stop()
                 print("\n👋 Bye!")
                 break
             
@@ -2741,13 +3220,28 @@ def main():
                         continue
                     
                     def on_voice_input(text):
-                        """Callback when VAD detects speech"""
+                        """Callback when VAD detects speech (with peer link coordination)"""
                         print(f"\n    💬 {Config.VOICE_SPEAKER_NAME}: {text}")
+                        
+                        # If peer link is active, wait for peer to finish before responding
+                        if peer_link.is_enabled and peer_link.is_connected:
+                            if peer_link.is_peer_busy():
+                                print(f"    ⏳ Waiting for {peer_link.peer_name} to finish...")
+                                if not peer_link.wait_for_peer_idle():
+                                    print(f"    ⚠ Peer still busy, responding anyway")
+                        
+                        # Broadcast that we're processing
+                        peer_link.set_state(PeerLinkManager.STATE_PROCESSING)
+                        
                         print("    🤔...")
                         response = process_message(Config.VOICE_SPEAKER_NAME, text, is_streaming)
                         if response:
                             print(f"\n{character.name}: {clean_response(response)}")
                             speak_text(response, extract_emotion(response))
+                        else:
+                            # No response generated, go back to idle
+                            peer_link.set_state(PeerLinkManager.STATE_IDLE)
+                        
                         # Re-show prompt
                         print(f"\n{icon} [{chat_queue.viewer_count}v|{max_tokens}t] {admin_icon}{current_user}: ", end="", flush=True)
                     
@@ -2756,6 +3250,60 @@ def main():
                 
                 if admin_cmd == "voice stop":
                     voice_manager.stop_listening()
+                    continue
+                
+                # ─────────────────────────────────────────────────
+                # PEER LINK COMMANDS (AI-to-AI Synchronization)
+                # ─────────────────────────────────────────────────
+                
+                if admin_cmd == "peer" or admin_cmd == "peer status":
+                    status = peer_link.get_status()
+                    print("    Peer Link Status:")
+                    print(f"      Enabled: {'Yes' if status['enabled'] else 'No'}")
+                    if status['enabled']:
+                        print(f"      Mode: {status['mode']}")
+                        print(f"      Connected: {'Yes 🤝' if status['connected'] else 'No'}")
+                        print(f"      My name: {status['my_name']} ({status['my_state']})")
+                        if status['connected']:
+                            print(f"      Peer: {status['peer_name']} ({status['peer_state']})")
+                    print("    Commands:")
+                    print(f"      {Config.ADMIN_PREFIX}peer on host         - Start as host (listen for peer)")
+                    print(f"      {Config.ADMIN_PREFIX}peer on client [ip]  - Connect to host")
+                    print(f"      {Config.ADMIN_PREFIX}peer off             - Disconnect")
+                    print(f"      {Config.ADMIN_PREFIX}peer name <name>     - Set instance name")
+                    continue
+                
+                if admin_cmd == "peer on host":
+                    if peer_link.is_enabled:
+                        print("    ⚠ Peer Link already active. Use !peer off first.")
+                        continue
+                    peer_link.name = Config.PEER_LINK_NAME
+                    peer_link.start_host(Config.PEER_LINK_PORT)
+                    continue
+                
+                if admin_cmd.startswith("peer on client"):
+                    if peer_link.is_enabled:
+                        print("    ⚠ Peer Link already active. Use !peer off first.")
+                        continue
+                    # Parse optional IP: !peer on client 192.168.1.100
+                    parts = admin_cmd.split()
+                    host_ip = parts[3] if len(parts) > 3 else Config.PEER_LINK_HOST
+                    peer_link.name = Config.PEER_LINK_NAME
+                    peer_link.start_client(host_ip, Config.PEER_LINK_PORT)
+                    continue
+                
+                if admin_cmd == "peer off":
+                    peer_link.stop()
+                    continue
+                
+                if admin_cmd.startswith("peer name "):
+                    new_name = admin_cmd[len("peer name "):].strip()
+                    if new_name:
+                        peer_link.name = new_name
+                        Config.PEER_LINK_NAME = new_name
+                        print(f"    ✓ Peer Link name: {new_name}")
+                    else:
+                        print(f"    ⚠ Usage: !peer name <name>")
                     continue
                 
                 # ─────────────────────────────────────────────────
@@ -2940,6 +3488,8 @@ def main():
             idle_chatter.reset_activity()
             
         except KeyboardInterrupt:
+            if peer_link.is_enabled:
+                peer_link.stop()
             print("\n\n👋 Bye!")
             break
         except Exception as e:
