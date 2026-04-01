@@ -25,7 +25,7 @@ An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text
 
 <div align="center">
   <a href="PASTE_YOUR_VIDEO_URL_HERE">
-    <img src="https://youtu.be/2-DD4iH9QDQ" 
+    <img src="<iframe width="560" height="315" src="https://www.youtube.com/embed/2-DD4iH9QDQ?si=Fh_HNvPuUfkIBNX9" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>" 
          alt="AI VTuber Demo" width="640">
   </a>
   <p><strong>Watch the full demo (with voice, chat, and avatar in action)</strong></p>
