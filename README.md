@@ -21,7 +21,16 @@ An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text
 - **OBS Ready** - Transparent background stage for easy streaming setup
 
 ---
+## 🎥 Demo Video
 
+<div align="center">
+  <a href="PASTE_YOUR_VIDEO_URL_HERE">
+    <img src="https://youtu.be/2-DD4iH9QDQ" 
+         alt="AI VTuber Demo" width="640">
+  </a>
+  <p><strong>Watch the full demo (with voice, chat, and avatar in action)</strong></p>
+</div>
+---
 ## 🚀 Quick Start
 
 ### 1. Download & Extract
