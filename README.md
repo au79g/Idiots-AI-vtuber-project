@@ -19,7 +19,16 @@ An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text
 - **Emotion Detection** - AI responses include emotion tags for avatar expressions
 - **Audio Output Routing** - Choose which audio device TTS plays through (useful for OBS virtual cables)
 - **OBS Ready** - Transparent background stage for easy streaming setup
+---
+## 🎥 Demo Video
 
+<div align="center">
+  <a href="PASTE_YOUR_VIDEO_URL_HERE">
+    <img src="https://img.youtube.com/vi/DD4iH9QDQ/maxresdefault.jpg" 
+         alt="AI VTuber Demo" width="640">
+  </a>
+  <p><strong>Watch the full demo (with voice, chat, and avatar in action)</strong></p>
+</div>
 ---
 
 ## 🚀 Quick Start
