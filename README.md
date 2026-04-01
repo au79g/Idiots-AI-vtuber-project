@@ -26,7 +26,7 @@ An AI-powered VTuber system that combines a local LLM with a 3D VRM avatar, text
 
 ### 1. Download & Extract
 ```bash
-git clone https://github.com/yourusername/ai-vtuber.git
+[https://github.com/au79g/Idiots-AI-vtuber-project.git]
 cd ai-vtuber
 ```
 
